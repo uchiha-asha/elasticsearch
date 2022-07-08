@@ -89,6 +89,7 @@ public final class ShardSearchStats implements SearchOperationListener {
             } else {
                 statsHolder.queryMetric.inc(tookInNanos);
                 statsHolder.queryCurrent.dec();
+                updateIndexPrefixMetrics(searchContext.query().toString(), statsHolder);
                 assert statsHolder.queryCurrent.count() >= 0;
             }
         });
@@ -136,6 +137,23 @@ public final class ShardSearchStats implements SearchOperationListener {
         return stats;
     }
 
+    private void updateIndexPrefixMetrics(String queryDescription, StatsHolder statsHolder) {
+        /* String description of a query contains substrings of form "field:value" in addition to the type of query info.
+         * The query processed by index prefix have string "._index_prefix" appended to their field.
+         * Thus, we need to count the number of occurrence of "._index_prefix:" to get index prefix metric.
+         */
+        for (int i=14; i<queryDescription.length(); i++) {
+            if (queryDescription.charAt(i) == ':') {
+                if (queryDescription.substring(i-14, i).equals("._index_prefix")) {
+                    statsHolder.indexPrefixMetric.inc();
+                }
+                else {
+                    statsHolder.nonIndexPrefixMetric.inc();
+                }
+            }
+        }
+    }
+
     @Override
     public void onNewReaderContext(ReaderContext readerContext) {
         openContexts.inc();
@@ -174,13 +192,16 @@ public final class ShardSearchStats implements SearchOperationListener {
         final CounterMetric fetchCurrent = new CounterMetric();
         final CounterMetric scrollCurrent = new CounterMetric();
         final CounterMetric suggestCurrent = new CounterMetric();
+        final CounterMetric indexPrefixMetric = new CounterMetric();
+        final CounterMetric nonIndexPrefixMetric = new CounterMetric();
 
         SearchStats.Stats stats() {
             return new SearchStats.Stats(
                     queryMetric.count(), TimeUnit.NANOSECONDS.toMillis(queryMetric.sum()), queryCurrent.count(),
                     fetchMetric.count(), TimeUnit.NANOSECONDS.toMillis(fetchMetric.sum()), fetchCurrent.count(),
                     scrollMetric.count(), TimeUnit.MICROSECONDS.toMillis(scrollMetric.sum()), scrollCurrent.count(),
-                    suggestMetric.count(), TimeUnit.NANOSECONDS.toMillis(suggestMetric.sum()), suggestCurrent.count()
+                    suggestMetric.count(), TimeUnit.NANOSECONDS.toMillis(suggestMetric.sum()), suggestCurrent.count(),
+                    indexPrefixMetric.count(), nonIndexPrefixMetric.count()
             );
         }
     }
