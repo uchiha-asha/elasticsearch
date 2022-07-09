@@ -142,9 +142,9 @@ public final class ShardSearchStats implements SearchOperationListener {
          * The query processed by index prefix have string "._index_prefix" appended to their field.
          * Thus, we need to count the number of occurrence of "._index_prefix:" to get index prefix metric.
          */
-        for (int i=14; i<queryDescription.length(); i++) {
+        for (int i=0; i<queryDescription.length(); i++) {
             if (queryDescription.charAt(i) == ':') {
-                if (queryDescription.substring(i-14, i).equals("._index_prefix")) {
+                if (i>13 && queryDescription.substring(i-14, i).equals("._index_prefix")) {
                     statsHolder.indexPrefixMetric.inc();
                 }
                 else {
