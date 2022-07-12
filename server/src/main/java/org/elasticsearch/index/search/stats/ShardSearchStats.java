@@ -11,14 +11,17 @@ package org.elasticsearch.index.search.stats;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.common.metrics.CounterMetric;
 import org.elasticsearch.common.metrics.MeanMetric;
+import org.elasticsearch.common.metrics.CounterMapMetric;
+import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.common.regex.Regex;
 import org.elasticsearch.common.util.CollectionUtils;
+import org.elasticsearch.index.mapper.MappedFieldType;
+import org.elasticsearch.index.mapper.TextFieldMapper;
 import org.elasticsearch.index.shard.SearchOperationListener;
 import org.elasticsearch.search.internal.ReaderContext;
 import org.elasticsearch.search.internal.SearchContext;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -89,6 +92,13 @@ public final class ShardSearchStats implements SearchOperationListener {
             } else {
                 statsHolder.queryMetric.inc(tookInNanos);
                 statsHolder.queryCurrent.dec();
+                // if fields with type text are not in the maps, then, insert all of them
+                if (statsHolder.indexPrefixMapMetric.size() == 0) {
+                    statsHolder.indexPrefixMapMetric.put(getTextFields(searchContext));
+                }
+                if (statsHolder.nonIndexPrefixMapMetric.size() == 0) {
+                    statsHolder.nonIndexPrefixMapMetric.put(getTextFields(searchContext));
+                }
                 updateIndexPrefixMetrics(searchContext.query().toString(), statsHolder);
                 assert statsHolder.queryCurrent.count() >= 0;
             }
@@ -137,18 +147,46 @@ public final class ShardSearchStats implements SearchOperationListener {
         return stats;
     }
 
+    private List<String> getTextFields(SearchContext searchContext) {
+        List<String> textFields = new ArrayList<>();
+        for (MappedFieldType fieldType: searchContext.getQueryShardContext().getFieldTypes()) {
+            if (fieldType instanceof TextFieldMapper.TextFieldType) {
+                textFields.add(fieldType.name());
+            }
+        }
+        return textFields;
+    }
+
     private void updateIndexPrefixMetrics(String queryDescription, StatsHolder statsHolder) {
         /* String description of a query contains substrings of form "field:value" in addition to the type of query info.
          * The query processed by index prefix have string "._index_prefix" appended to their field.
          * Thus, we need to count the number of occurrence of "._index_prefix:" to get index prefix metric.
          */
+        int last_breaking_char_index = -1; // index of last occurrence of '(', ')', '[', ']', ' '
         for (int i=0; i<queryDescription.length(); i++) {
-            if (queryDescription.charAt(i) == ':') {
+            char c = queryDescription.charAt(i);
+            if (c == '(' || c == ')' || c == '[' || c == ']' || c == ' ' || c == '+') {
+                last_breaking_char_index = i;
+            }
+            else if (c == ':') {
                 if (i>13 && queryDescription.substring(i-14, i).equals("._index_prefix")) {
                     statsHolder.indexPrefixMetric.inc();
+                    statsHolder.indexPrefixMapMetric.inc(
+                        queryDescription.substring(last_breaking_char_index+1, i-14)
+                    );
                 }
                 else {
                     statsHolder.nonIndexPrefixMetric.inc();
+                    if (i>13 && queryDescription.substring(i-14, i).equals("._index_phrase")) {
+                        statsHolder.nonIndexPrefixMapMetric.inc(
+                            queryDescription.substring(last_breaking_char_index+1, i-14)
+                        );
+                    }
+                    else {
+                        statsHolder.nonIndexPrefixMapMetric.inc(
+                            queryDescription.substring(last_breaking_char_index+1, i)
+                        );
+                    }
                 }
             }
         }
@@ -194,6 +232,9 @@ public final class ShardSearchStats implements SearchOperationListener {
         final CounterMetric suggestCurrent = new CounterMetric();
         final CounterMetric indexPrefixMetric = new CounterMetric();
         final CounterMetric nonIndexPrefixMetric = new CounterMetric();
+        final CounterMapMetric<String> indexPrefixMapMetric = new CounterMapMetric<>();
+        final CounterMapMetric<String> nonIndexPrefixMapMetric = new CounterMapMetric<>();
+
 
         SearchStats.Stats stats() {
             return new SearchStats.Stats(
@@ -201,7 +242,7 @@ public final class ShardSearchStats implements SearchOperationListener {
                     fetchMetric.count(), TimeUnit.NANOSECONDS.toMillis(fetchMetric.sum()), fetchCurrent.count(),
                     scrollMetric.count(), TimeUnit.MICROSECONDS.toMillis(scrollMetric.sum()), scrollCurrent.count(),
                     suggestMetric.count(), TimeUnit.NANOSECONDS.toMillis(suggestMetric.sum()), suggestCurrent.count(),
-                    indexPrefixMetric.count(), nonIndexPrefixMetric.count()
+                    indexPrefixMetric.count(), nonIndexPrefixMetric.count(), indexPrefixMapMetric.count(), nonIndexPrefixMapMetric.count()
             );
         }
     }
