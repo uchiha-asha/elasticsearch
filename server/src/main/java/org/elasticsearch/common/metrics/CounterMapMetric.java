@@ -29,27 +29,19 @@ public class CounterMapMetric<K> {
     }
 
     public void inc(K key) {
-        if (counterMap.containsKey(key)) {
-            counterMap.get(key).increment();
-        }
+        counterMap.get(key).increment();
     }
 
     public void inc(K key, long n) {
-        if (counterMap.containsKey(key)) {
-            counterMap.get(key).add(n);
-        }
+        counterMap.get(key).add(n);
     }
 
     public void dec(K key) {
-        if (counterMap.containsKey(key)) {
-            counterMap.get(key).decrement();
-        }
+        counterMap.get(key).decrement();
     }
 
     public void dec(K key, long n) {
-        if (counterMap.containsKey(key)) {
-            counterMap.get(key).add(-n);
-        }
+        counterMap.get(key).add(-n);
     }
 
     public Map<K, Long> count() {

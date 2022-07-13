@@ -24,6 +24,8 @@ import org.elasticsearch.search.internal.SearchContext;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static java.util.Collections.emptyMap;
 
@@ -99,7 +101,7 @@ public final class ShardSearchStats implements SearchOperationListener {
                 if (statsHolder.nonIndexPrefixMapMetric.size() == 0) {
                     statsHolder.nonIndexPrefixMapMetric.put(getTextFields(searchContext));
                 }
-                updateIndexPrefixMetrics(searchContext.query().toString(), statsHolder);
+                updateIndexPrefixMetrics(searchContext, statsHolder);
                 assert statsHolder.queryCurrent.count() >= 0;
             }
         });
@@ -157,37 +159,32 @@ public final class ShardSearchStats implements SearchOperationListener {
         return textFields;
     }
 
-    private void updateIndexPrefixMetrics(String queryDescription, StatsHolder statsHolder) {
+    private void updateIndexPrefixMetrics(SearchContext searchContext, StatsHolder statsHolder) {
         /* String description of a query contains substrings of form "field:value" in addition to the type of query info.
          * The query processed by index prefix have string "._index_prefix" appended to their field.
          * Thus, we need to count the number of occurrence of "._index_prefix:" to get index prefix metric.
          */
-        int last_breaking_char_index = -1; // index of last occurrence of '(', ')', '[', ']', ' '
-        for (int i=0; i<queryDescription.length(); i++) {
-            char c = queryDescription.charAt(i);
-            if (c == '(' || c == ')' || c == '[' || c == ']' || c == ' ' || c == '+') {
-                last_breaking_char_index = i;
-            }
-            else if (c == ':') {
-                if (i>13 && queryDescription.substring(i-14, i).equals("._index_prefix")) {
+
+        List<String> fields = QueryDescriptionParser.getFieldsFromQuery(searchContext.query().toString());
+        for (String field: fields) {
+            if (field.length() > 14) {
+                String suffix = field.substring(field.length()-14);
+                if (suffix.equals("._index_prefix")) {
                     statsHolder.indexPrefixMetric.inc();
-                    statsHolder.indexPrefixMapMetric.inc(
-                        queryDescription.substring(last_breaking_char_index+1, i-14)
-                    );
+                    statsHolder.indexPrefixMapMetric.inc(field.substring(0, field.length()-14));
                 }
-                else {
+                else if (suffix.equals("._index_phrase")) {
                     statsHolder.nonIndexPrefixMetric.inc();
-                    if (i>13 && queryDescription.substring(i-14, i).equals("._index_phrase")) {
-                        statsHolder.nonIndexPrefixMapMetric.inc(
-                            queryDescription.substring(last_breaking_char_index+1, i-14)
-                        );
-                    }
-                    else {
-                        statsHolder.nonIndexPrefixMapMetric.inc(
-                            queryDescription.substring(last_breaking_char_index+1, i)
-                        );
-                    }
+                    statsHolder.nonIndexPrefixMapMetric.inc(field.substring(0, field.length()-14));
                 }
+                else if (searchContext.getQueryShardContext().getFieldType(field) instanceof TextFieldMapper.TextFieldType) {
+                    statsHolder.nonIndexPrefixMetric.inc();
+                    statsHolder.nonIndexPrefixMapMetric.inc(field);
+                }
+            }
+            else if (searchContext.getQueryShardContext().getFieldType(field) instanceof TextFieldMapper.TextFieldType) {
+                statsHolder.nonIndexPrefixMetric.inc();
+                statsHolder.nonIndexPrefixMapMetric.inc(field);
             }
         }
     }
@@ -212,6 +209,34 @@ public final class ShardSearchStats implements SearchOperationListener {
         totalStats.scrollCurrent.dec();
         assert totalStats.scrollCurrent.count() >= 0;
         totalStats.scrollMetric.inc(TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - readerContext.getStartTimeInNano()));
+    }
+
+    static final class QueryDescriptionParser {
+        static final String SpecialCharacters = "[+\\-&|!()\\[\\]{}^\"~\\*? ]";
+        static final Pattern pattern = Pattern.compile(SpecialCharacters);
+
+        public static List<String> getFieldsFromQuery(String query) {
+            List<String> fields = new ArrayList<>();
+            Matcher matcher = pattern.matcher(query);
+            int last_special_char_index = -1, j = -1;
+            for (int i=0; i<query.length(); i++) {
+                if (query.charAt(i) == ':' && (i>0 && query.charAt(i-1) != '\\')) {
+                    while (j < i) {
+                        if (!(j > 0 && query.charAt(j-1) == '\\')) {
+                            last_special_char_index = j;
+                        }
+                        if (matcher.find()) {
+                            j = matcher.start();
+                        }
+                        else {
+                            break;
+                        }
+                    }
+                    fields.add(query.substring(last_special_char_index+1, i));
+                }
+            }
+            return fields;
+        }
     }
 
     static final class StatsHolder {
