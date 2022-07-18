@@ -32,6 +32,15 @@ public class CounterMapMetric<K> {
         counterMap.get(key).increment();
     }
 
+    public void inc(CounterMapMetric<K> counterMapMetric) {
+        for (Map.Entry entry: counterMap.entrySet()) {
+            K key = (K)entry.getKey();
+            if (counterMapMetric.counterMap.containsKey(key)) {
+                inc(key, counterMapMetric.counterMap.get(key).sum());
+            }
+        }
+    }
+
     public void inc(K key, long n) {
         counterMap.get(key).add(n);
     }

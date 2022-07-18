@@ -8,6 +8,7 @@
 
 package org.elasticsearch.index.search.stats;
 
+import org.elasticsearch.cluster.RestoreInProgress;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.common.metrics.CounterMetric;
 import org.elasticsearch.common.metrics.MeanMetric;
@@ -101,7 +102,8 @@ public final class ShardSearchStats implements SearchOperationListener {
                 if (statsHolder.nonIndexPrefixMapMetric.size() == 0) {
                     statsHolder.nonIndexPrefixMapMetric.put(getTextFields(searchContext));
                 }
-                updateIndexPrefixMetrics(searchContext, statsHolder);
+                updateIndexPrefixMetrics2(searchContext, statsHolder);
+//                updateIndexPrefixMetrics(searchContext, statsHolder);
                 assert statsHolder.queryCurrent.count() >= 0;
             }
         });
@@ -157,6 +159,11 @@ public final class ShardSearchStats implements SearchOperationListener {
             }
         }
         return textFields;
+    }
+
+    private void updateIndexPrefixMetrics2(SearchContext searchContext, StatsHolder statsHolder) {
+        statsHolder.indexPrefixMapMetric.inc(searchContext.getQueryShardContext().indexPrefixMapMetric);
+        statsHolder.nonIndexPrefixMapMetric.inc(searchContext.getQueryShardContext().nonIndexPrefixMapMetric);
     }
 
     private void updateIndexPrefixMetrics(SearchContext searchContext, StatsHolder statsHolder) {
