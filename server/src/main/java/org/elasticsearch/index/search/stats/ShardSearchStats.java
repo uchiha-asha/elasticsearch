@@ -8,7 +8,7 @@
 
 package org.elasticsearch.index.search.stats;
 
-import org.elasticsearch.cluster.RestoreInProgress;
+
 import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.common.metrics.CounterMetric;
 import org.elasticsearch.common.metrics.MeanMetric;

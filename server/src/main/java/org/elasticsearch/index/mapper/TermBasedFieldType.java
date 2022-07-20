@@ -17,7 +17,6 @@ import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.lucene.BytesRefs;
 import org.elasticsearch.common.lucene.search.AutomatonQueries;
 import org.elasticsearch.index.query.QueryShardContext;
-import org.elasticsearch.index.similarity.ScriptedSimilarity;
 
 import java.util.List;
 import java.util.Map;
