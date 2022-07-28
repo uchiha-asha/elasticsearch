@@ -277,6 +277,10 @@ public class RestRequest implements ToXContent.Params {
         return params.containsKey(key);
     }
 
+    public void consumeParam(String param) {
+        consumedParams.add(param);
+    }
+
     @Override
     public final String param(String key) {
         consumedParams.add(key);

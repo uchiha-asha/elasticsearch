@@ -26,6 +26,7 @@ import java.io.IOException;
 public class IndicesStatsRequest extends BroadcastRequest<IndicesStatsRequest> {
 
     private CommonStatsFlags flags = new CommonStatsFlags();
+    private boolean clear = false;
 
     public IndicesStatsRequest() {
         super((String[])null);
@@ -91,6 +92,14 @@ public class IndicesStatsRequest extends BroadcastRequest<IndicesStatsRequest> {
     public IndicesStatsRequest groups(String... groups) {
         flags.groups(groups);
         return this;
+    }
+
+    public void clearStats() {
+        this.clear = true;
+    }
+
+    public boolean canClearStats() {
+        return this.clear;
     }
 
     public String[] groups() {

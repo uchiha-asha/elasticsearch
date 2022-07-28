@@ -235,6 +235,39 @@ public class CommonStats implements Writeable, ToXContentFragment {
         recoveryStats = in.readOptionalWriteable(RecoveryStats::new);
     }
 
+    public static void clearCommonStats(IndicesQueryCache indicesQueryCache, IndexShard indexShard, CommonStatsFlags flags) {
+        CommonStatsFlags.Flag[] setFlags = flags.getFlags();
+        for (CommonStatsFlags.Flag flag : setFlags) {
+            try {
+                switch (flag) {
+                    case Search:
+                        indexShard.clearSearchStats();
+                        break;
+                    case Docs:
+                    case Store:
+                    case Indexing:
+                    case Get:
+                    case Merge:
+                    case Refresh:
+                    case Flush:
+                    case Warmer:
+                    case QueryCache:
+                    case FieldData:
+                    case Completion:
+                    case Segments:
+                    case Translog:
+                    case RequestCache:
+                    case Recovery:
+                        throw new IllegalStateException("Only search flag is supported");
+                    default:
+                        throw new IllegalStateException("Unknown Flag: " + flag);
+                }
+            } catch (AlreadyClosedException e) {
+                // shard is closed - no stats is fine
+            }
+        }
+    }
+
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeOptionalWriteable(docs);

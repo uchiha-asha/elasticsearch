@@ -91,6 +91,10 @@ public class TransportIndicesStatsAction extends TransportBroadcastByNodeAction<
             throw new ShardNotFoundException(indexShard.shardId());
         }
 
+        if (request.canClearStats()) {
+            CommonStats.clearCommonStats(indicesService.getIndicesQueryCache(), indexShard, request.flags());
+        }
+
         CommonStats commonStats = new CommonStats(indicesService.getIndicesQueryCache(), indexShard, request.flags());
         CommitStats commitStats;
         SeqNoStats seqNoStats;

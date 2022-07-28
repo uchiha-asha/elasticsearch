@@ -193,7 +193,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private final IndexCache indexCache;
     private final Store store;
     private final InternalIndexingStats internalIndexingStats;
-    private final ShardSearchStats searchStats = new ShardSearchStats();
+    private ShardSearchStats searchStats = new ShardSearchStats();
     private final ShardGetService getService;
     private final ShardIndexWarmerService shardWarmerService;
     private final ShardRequestCache requestCacheStats;
@@ -1123,6 +1123,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public CompletionStats completionStats(String... fields) {
         readAllowed();
         return getEngine().completionStats(fields);
+    }
+
+    public void clearSearchStats() {
+        searchStats = new ShardSearchStats();
     }
 
     public Engine.SyncedFlushResult syncFlush(String syncId, Engine.CommitId expectedCommitId) {
