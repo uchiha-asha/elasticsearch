@@ -102,8 +102,7 @@ public final class ShardSearchStats implements SearchOperationListener {
                 if (statsHolder.nonIndexPrefixMapMetric.size() == 0) {
                     statsHolder.nonIndexPrefixMapMetric.put(getTextFields(searchContext));
                 }
-                updateIndexPrefixMetrics2(searchContext, statsHolder);
-//                updateIndexPrefixMetrics(searchContext, statsHolder);
+                updateIndexPrefixMetrics(searchContext, statsHolder);
                 assert statsHolder.queryCurrent.count() >= 0;
             }
         });
@@ -161,39 +160,9 @@ public final class ShardSearchStats implements SearchOperationListener {
         return textFields;
     }
 
-    private void updateIndexPrefixMetrics2(SearchContext searchContext, StatsHolder statsHolder) {
+    private void updateIndexPrefixMetrics(SearchContext searchContext, StatsHolder statsHolder) {
         statsHolder.indexPrefixMapMetric.inc(searchContext.getQueryShardContext().indexPrefixMapMetric);
         statsHolder.nonIndexPrefixMapMetric.inc(searchContext.getQueryShardContext().nonIndexPrefixMapMetric);
-    }
-
-    private void updateIndexPrefixMetrics(SearchContext searchContext, StatsHolder statsHolder) {
-        /* String description of a query contains substrings of form "field:value" in addition to the type of query info.
-         * The query processed by index prefix have string "._index_prefix" appended to their field.
-         * Thus, we need to count the number of occurrence of "._index_prefix:" to get index prefix metric.
-         */
-
-        List<String> fields = QueryDescriptionParser.getFieldsFromQuery(searchContext.query().toString());
-        for (String field: fields) {
-            if (field.length() > 14) {
-                String suffix = field.substring(field.length()-14);
-                if (suffix.equals("._index_prefix")) {
-                    statsHolder.indexPrefixMetric.inc();
-                    statsHolder.indexPrefixMapMetric.inc(field.substring(0, field.length()-14));
-                }
-                else if (suffix.equals("._index_phrase")) {
-                    statsHolder.nonIndexPrefixMetric.inc();
-                    statsHolder.nonIndexPrefixMapMetric.inc(field.substring(0, field.length()-14));
-                }
-                else if (searchContext.getQueryShardContext().getFieldType(field) instanceof TextFieldMapper.TextFieldType) {
-                    statsHolder.nonIndexPrefixMetric.inc();
-                    statsHolder.nonIndexPrefixMapMetric.inc(field);
-                }
-            }
-            else if (searchContext.getQueryShardContext().getFieldType(field) instanceof TextFieldMapper.TextFieldType) {
-                statsHolder.nonIndexPrefixMetric.inc();
-                statsHolder.nonIndexPrefixMapMetric.inc(field);
-            }
-        }
     }
 
     @Override
@@ -216,34 +185,6 @@ public final class ShardSearchStats implements SearchOperationListener {
         totalStats.scrollCurrent.dec();
         assert totalStats.scrollCurrent.count() >= 0;
         totalStats.scrollMetric.inc(TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - readerContext.getStartTimeInNano()));
-    }
-
-    static final class QueryDescriptionParser {
-        static final String SpecialCharacters = "[+\\-&|!()\\[\\]{}^\"~\\*? ]";
-        static final Pattern pattern = Pattern.compile(SpecialCharacters);
-
-        public static List<String> getFieldsFromQuery(String query) {
-            List<String> fields = new ArrayList<>();
-            Matcher matcher = pattern.matcher(query);
-            int last_special_char_index = -1, j = -1;
-            for (int i=0; i<query.length(); i++) {
-                if (query.charAt(i) == ':' && (i>0 && query.charAt(i-1) != '\\')) {
-                    while (j < i) {
-                        if (!(j > 0 && query.charAt(j-1) == '\\')) {
-                            last_special_char_index = j;
-                        }
-                        if (matcher.find()) {
-                            j = matcher.start();
-                        }
-                        else {
-                            break;
-                        }
-                    }
-                    fields.add(query.substring(last_special_char_index+1, i));
-                }
-            }
-            return fields;
-        }
     }
 
     static final class StatsHolder {
