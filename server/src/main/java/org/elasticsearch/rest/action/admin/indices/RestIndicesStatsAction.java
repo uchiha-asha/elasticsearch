@@ -103,11 +103,6 @@ public class RestIndicesStatsAction extends BaseRestHandler {
             }
         }
 
-        if (request.hasParam("clear")) {
-            request.consumeParam("clear");
-            indicesStatsRequest.clearStats();
-        }
-
         if (request.hasParam("groups")) {
             indicesStatsRequest.groups(Strings.splitStringByCommaToArray(request.param("groups")));
         }
