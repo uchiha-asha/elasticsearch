@@ -150,6 +150,11 @@ addSubProjects('test', new File(rootProject.projectDir, 'test/external-modules')
 addSubProjects('', new File(rootProject.projectDir, 'x-pack'))
 addSubProjects('', new File(rootProject.projectDir, 'x-pack/libs'))
 
+// Opt-in escape hatch for environments that cannot reach jitpack.io, where the deb/rpm packaging plugin is hosted.
+// Enable with -Pes.skipPackagingProjects=true (or in ~/.gradle/gradle.properties).
+if (providers.gradleProperty('es.skipPackagingProjects').getOrElse('false').toBoolean()) {
+  projects.removeIf { it.startsWith('distribution:packages') }
+}
 include projects.toArray(new String[0])
 
 project(":libs").children.each { libsProject ->
