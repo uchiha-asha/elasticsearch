@@ -605,7 +605,11 @@ subprojects {
  'packages:rpm', 'packages:deb',
  'packages:aarch64-rpm', 'packages:aarch64-deb',
 ].forEach { subName ->
-  Project subproject = project("${project.path}:${subName}")
+  Project subproject = findProject("${project.path}:${subName}")
+  if (subproject == null) {
+    // packaging projects are left out when es.skipPackagingProjects is set
+    return
+  }
   Configuration configuration = configurations.create(subproject.name)
   dependencies {
     "${configuration.name}" project(path: subproject.path, configuration:'default')
