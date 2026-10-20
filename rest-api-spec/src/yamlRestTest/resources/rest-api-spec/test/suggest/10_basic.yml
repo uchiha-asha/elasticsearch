@@ -23,3 +23,21 @@ setup:
 
   - match: {suggest.test_suggestion.1.options.0.text: amsterdam}
   - match: {suggest.test_suggestion.2.options.0.text: meetup}
+
+---
+"Term suggestion from URL parameters without suggest_mode":
+  - requires:
+      capabilities:
+        - method: GET
+          path: /_search
+          capabilities: [ suggest_url_params_default_mode ]
+      test_runner_features: capabilities
+      reason: "suggest_mode defaults to missing when suggest_field is set"
+
+  - do:
+      search:
+        index: test
+        suggest_field: body
+        suggest_text: "Amsterdma"
+
+  - match: {suggest.body.0.options.0.text: amsterdam}

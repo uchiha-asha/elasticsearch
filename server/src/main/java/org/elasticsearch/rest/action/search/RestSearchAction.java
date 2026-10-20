@@ -418,13 +418,13 @@ public class RestSearchAction extends BaseRestHandler {
         if (suggestField != null) {
             String suggestText = request.param("suggest_text", request.param("q"));
             int suggestSize = request.paramAsInt("suggest_size", 5);
+            TermSuggestionBuilder termSuggestion = termSuggestion(suggestField).text(suggestText).size(suggestSize);
             String suggestMode = request.param("suggest_mode");
-            return new SuggestBuilder().addSuggestion(
-                suggestField,
-                termSuggestion(suggestField).text(suggestText)
-                    .size(suggestSize)
-                    .suggestMode(TermSuggestionBuilder.SuggestMode.resolve(suggestMode))
-            );
+            // without a suggest_mode parameter the builder keeps its default mode
+            if (suggestMode != null) {
+                termSuggestion.suggestMode(TermSuggestionBuilder.SuggestMode.resolve(suggestMode));
+            }
+            return new SuggestBuilder().addSuggestion(suggestField, termSuggestion);
         } else {
             List<String> unconsumedParams = Arrays.stream(suggestQueryStringParams).filter(key -> request.param(key) != null).toList();
             if (unconsumedParams.isEmpty() == false) {

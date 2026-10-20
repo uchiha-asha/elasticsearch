@@ -80,6 +80,9 @@ public final class SearchCapabilities {
     /** A text field that indexes no positions answers positional queries from the values it keeps. */
     private static final String POSITIONAL_QUERIES_ON_TEXT_WITHOUT_POSITIONS = "positional_queries_on_text_without_positions";
 
+    /** The {@code suggest_field} URL parameter defaults {@code suggest_mode} to {@code missing}. */
+    private static final String SUGGEST_URL_PARAMS_DEFAULT_MODE = "suggest_url_params_default_mode";
+
     public static final Set<String> CAPABILITIES;
     static {
         HashSet<String> capabilities = new HashSet<>();
@@ -120,6 +123,7 @@ public final class SearchCapabilities {
         capabilities.add(KEYED_FLATTENED_UNSUPPORTED_QUERIES_BAD_REQUEST);
         capabilities.add(POSITIONAL_QUERIES_ON_TEXT_WITHOUT_POSITIONS);
         capabilities.add(RANGE_FIELD_DV_QUERY_DESCRIPTION_HAS_FIELD);
+        capabilities.add(SUGGEST_URL_PARAMS_DEFAULT_MODE);
         CAPABILITIES = Set.copyOf(capabilities);
     }
 }
