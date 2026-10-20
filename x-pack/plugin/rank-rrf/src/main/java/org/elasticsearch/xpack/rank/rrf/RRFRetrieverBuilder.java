@@ -58,6 +58,7 @@ public final class RRFRetrieverBuilder extends CompoundRetrieverBuilder<RRFRetri
     public static final NodeFeature MULTI_INDEX_SIMPLIFIED_FORMAT_SUPPORT = new NodeFeature(
         "rrf_retriever.multi_index_simplified_format_support"
     );
+    public static final NodeFeature MIN_SCORE_SUPPORT = new NodeFeature("rrf_retriever.min_score");
     public static final String NAME = "rrf";
 
     public static final ParseField RETRIEVERS_FIELD = new ParseField("retrievers");
@@ -191,6 +192,7 @@ public final class RRFRetrieverBuilder extends CompoundRetrieverBuilder<RRFRetri
         );
         clone.preFilterQueryBuilders = newPreFilterQueryBuilders;
         clone.retrieverName = retrieverName;
+        clone.minScore = minScore;
         return clone;
     }
 
@@ -248,6 +250,10 @@ public final class RRFRetrieverBuilder extends CompoundRetrieverBuilder<RRFRetri
             topResults[rank] = sortedResults[rank];
             topResults[rank].rank = rank + 1;
         }
+        // Filter by minScore if set (inclusive), keeping the ranks assigned above
+        if (minScore != null) {
+            topResults = Arrays.stream(topResults).filter(doc -> doc.score >= minScore).toArray(RRFRankDoc[]::new);
+        }
         return topResults;
     }
 
@@ -275,11 +281,21 @@ public final class RRFRetrieverBuilder extends CompoundRetrieverBuilder<RRFRetri
             ).stream().map(RetrieverSource::from).toList();
 
             if (fieldsInnerRetrievers.isEmpty() == false) {
-                // TODO: This is a incomplete solution as it does not address other incomplete copy issues
-                // (such as dropping the retriever name and min score)
+                // The rewritten retriever carries over the prefilters, the retriever name and the min score.
+                // min_score applies to the outer fused score only, so the per-group inner retrievers leave it unset.
                 float[] weights = createDefaultWeights(fieldsInnerRetrievers);
-                rewritten = new RRFRetrieverBuilder(fieldsInnerRetrievers, null, null, rankWindowSize, rankConstant, weights);
-                rewritten.getPreFilterQueryBuilders().addAll(preFilterQueryBuilders);
+                RRFRetrieverBuilder rewrittenRrf = new RRFRetrieverBuilder(
+                    fieldsInnerRetrievers,
+                    null,
+                    null,
+                    rankWindowSize,
+                    rankConstant,
+                    weights
+                );
+                rewrittenRrf.getPreFilterQueryBuilders().addAll(preFilterQueryBuilders);
+                rewrittenRrf.retrieverName(retrieverName);
+                rewrittenRrf.minScore(minScore);
+                rewritten = rewrittenRrf;
             } else {
                 // Inner retriever list can be empty when using an index wildcard pattern that doesn't match any indices
                 rewritten = new StandardRetrieverBuilder(new MatchNoneQueryBuilder());

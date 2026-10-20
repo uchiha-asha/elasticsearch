@@ -54,6 +54,7 @@ import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertResp
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 
 @ESIntegTestCase.ClusterScope(minNumDataNodes = 3)
@@ -312,6 +313,65 @@ public class RRFRetrieverBuilderIT extends ESIntegTestCase {
             assertThat(terms.getBucketByKey("technology").getDocCount(), equalTo(3L));
             assertThat(terms.getBucketByKey("astronomy").getDocCount(), equalTo(1L));
             assertThat(terms.getBucketByKey("biology").getDocCount(), equalTo(1L));
+        });
+    }
+
+    /**
+     * The rrf retriever's own min_score filters on the fused rrf scores. With rank_constant 1 and unit weights the fused
+     * scores are doc_5: 1/3 + 1/2, doc_4: 1/2, doc_6: 1/3 and doc_1: 1/4.
+     */
+    public void testRRFRetrieverMinScore() {
+        final int rankWindowSize = 100;
+        final int rankConstant = 1;
+        // this one retrieves docs 4, 5 and 1 in that order
+        StandardRetrieverBuilder standard0 = new StandardRetrieverBuilder(
+            QueryBuilders.boolQuery()
+                .should(QueryBuilders.constantScoreQuery(QueryBuilders.idsQuery().addIds("doc_4")).boost(10L))
+                .should(QueryBuilders.constantScoreQuery(QueryBuilders.idsQuery().addIds("doc_5")).boost(9L))
+                .should(QueryBuilders.constantScoreQuery(QueryBuilders.idsQuery().addIds("doc_1")).boost(8L))
+        );
+        // this one retrieves docs 5 and 6 in that order
+        StandardRetrieverBuilder standard1 = new StandardRetrieverBuilder(
+            QueryBuilders.boolQuery()
+                .should(QueryBuilders.constantScoreQuery(QueryBuilders.idsQuery().addIds("doc_5")).boost(10L))
+                .should(QueryBuilders.constantScoreQuery(QueryBuilders.idsQuery().addIds("doc_6")).boost(9L))
+        );
+        RRFRetrieverBuilder rrf = new RRFRetrieverBuilder(
+            Arrays.asList(
+                new CompoundRetrieverBuilder.RetrieverSource(standard0, null),
+                new CompoundRetrieverBuilder.RetrieverSource(standard1, null)
+            ),
+            rankWindowSize,
+            rankConstant
+        );
+        rrf.minScore(0.3f);
+        final int size = randomIntBetween(1, 10);
+        SearchSourceBuilder source = new SearchSourceBuilder().retriever(rrf).trackTotalHits(true).size(size);
+        ElasticsearchAssertions.assertResponse(client().prepareSearch(INDEX).setSource(source), resp -> {
+            assertThat(resp.getHits().getTotalHits().value(), equalTo(3L));
+            assertThat(resp.getHits().getTotalHits().relation(), equalTo(TotalHits.Relation.EQUAL_TO));
+            String[] expectedIds = new String[] { "doc_5", "doc_4", "doc_6" };
+            assertThat(resp.getHits().getHits().length, equalTo(Math.min(size, expectedIds.length)));
+            for (int i = 0; i < resp.getHits().getHits().length; i++) {
+                assertThat(resp.getHits().getAt(i).getId(), equalTo(expectedIds[i]));
+                assertThat(resp.getHits().getAt(i).getScore(), greaterThanOrEqualTo(0.3f));
+            }
+        });
+
+        // the largest possible fused score is 2 / (rank_constant + 1) = 1
+        RRFRetrieverBuilder rrfAboveAllScores = new RRFRetrieverBuilder(
+            Arrays.asList(
+                new CompoundRetrieverBuilder.RetrieverSource(standard0, null),
+                new CompoundRetrieverBuilder.RetrieverSource(standard1, null)
+            ),
+            rankWindowSize,
+            rankConstant
+        );
+        rrfAboveAllScores.minScore(1.5f);
+        SearchSourceBuilder sourceAboveAllScores = new SearchSourceBuilder().retriever(rrfAboveAllScores).trackTotalHits(true);
+        ElasticsearchAssertions.assertResponse(client().prepareSearch(INDEX).setSource(sourceAboveAllScores), resp -> {
+            assertThat(resp.getHits().getTotalHits().value(), equalTo(0L));
+            assertThat(resp.getHits().getHits().length, equalTo(0));
         });
     }
 

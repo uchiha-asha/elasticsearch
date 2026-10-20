@@ -979,6 +979,103 @@ setup:
   - match: { hits.hits.0._id: "1" }
 
 ---
+"rrf retriever applies its own min_score to the fused scores":
+  - requires:
+      cluster_features: "rrf_retriever.min_score"
+      reason: "rrf retriever applies min_score to fused scores"
+
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test
+        body:
+          track_total_hits: true
+          retriever:
+            rrf:
+              retrievers: [
+                {
+                  # this one retrieves docs 4, 5, 1 in that order
+                  standard: {
+                    query: {
+                      bool: {
+                        should: [
+                          { constant_score: { filter: { term: { text: term4 } }, boost: 10.0 } },
+                          { constant_score: { filter: { term: { text: term5 } }, boost: 9.0 } },
+                          { constant_score: { filter: { term: { text: term1 } }, boost: 8.0 } }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  # this one retrieves docs 5, 6 in that order
+                  standard: {
+                    query: {
+                      bool: {
+                        should: [
+                          { constant_score: { filter: { term: { text: term5 } }, boost: 10.0 } },
+                          { constant_score: { filter: { term: { text: term6 } }, boost: 9.0 } }
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+              rank_window_size: 10
+              rank_constant: 1
+              # fused scores: doc 5 = 1/3 + 1/2, doc 4 = 1/2, doc 6 = 1/3, doc 1 = 1/4
+              min_score: 0.3
+          size: 10
+
+  - match: { hits.total: 3 }
+  - length: { hits.hits: 3 }
+  - match: { hits.hits.0._id: "5" }
+  - match: { hits.hits.1._id: "4" }
+  - match: { hits.hits.2._id: "6" }
+
+---
+"rrf retriever min_score above every fused score returns no hits":
+  - requires:
+      cluster_features: "rrf_retriever.min_score"
+      reason: "rrf retriever applies min_score to fused scores"
+
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test
+        body:
+          track_total_hits: true
+          retriever:
+            rrf:
+              retrievers: [
+                {
+                  standard: {
+                    query: {
+                      term: {
+                        keyword: technology
+                      }
+                    }
+                  }
+                },
+                {
+                  standard: {
+                    query: {
+                      term: {
+                        keyword: biology
+                      }
+                    }
+                  }
+                }
+              ]
+              rank_window_size: 10
+              # the largest possible fused score is 2 / (rank_constant + 1), about 0.033 with the default rank_constant
+              min_score: 1
+          size: 10
+
+  - match: { hits.total: 0 }
+  - length: { hits.hits: 0 }
+
+---
 "rrf retriever with inner_hits for sub-retriever":
   - skip:
       features: [ "headers" ]

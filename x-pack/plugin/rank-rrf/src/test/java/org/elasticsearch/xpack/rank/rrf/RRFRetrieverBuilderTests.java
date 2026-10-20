@@ -7,18 +7,23 @@
 
 package org.elasticsearch.xpack.rank.rrf;
 
+import org.apache.lucene.search.ScoreDoc;
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.action.ResolvedIndices;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.Tuple;
+import org.elasticsearch.index.query.MatchAllQueryBuilder;
 import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.search.SearchModule;
 import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.retriever.AbstractRetrieverBuilderTests;
+import org.elasticsearch.search.retriever.CompoundRetrieverBuilder;
+import org.elasticsearch.search.retriever.CompoundRetrieverBuilder.RetrieverSource;
 import org.elasticsearch.search.retriever.RetrieverBuilder;
 import org.elasticsearch.search.retriever.RetrieverParserContext;
+import org.elasticsearch.search.retriever.StandardRetrieverBuilder;
 import org.elasticsearch.transport.RemoteClusterAware;
 import org.elasticsearch.xcontent.NamedXContentRegistry;
 import org.elasticsearch.xcontent.ParseField;
@@ -33,6 +38,7 @@ import java.util.function.BiConsumer;
 
 import static org.elasticsearch.search.rank.RankBuilder.DEFAULT_RANK_WINDOW_SIZE;
 import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.nullValue;
 
 /** Tests for the rrf retriever. */
 public class RRFRetrieverBuilderTests extends AbstractRetrieverBuilderTests<RRFRetrieverBuilder> {
@@ -285,6 +291,120 @@ public class RRFRetrieverBuilderTests extends AbstractRetrieverBuilderTests<RRFR
             Map.of("semantic_field_1", 1.0f, "semantic_field_2", 1.0f),
             "qux"
         );
+    }
+
+    /**
+     * The multi-fields rewrite keeps the retriever name and min score on the top-level rrf retriever, which fuses the
+     * per-group results, and leaves min score unset on the per-group inner retrievers.
+     */
+    public void testMultiFieldsParamsRewriteKeepsMinScoreAndRetrieverName() {
+        final String indexName = "test-index";
+        final List<String> testInferenceFields = List.of("semantic_field_1", "semantic_field_2");
+        final ResolvedIndices resolvedIndices = createMockResolvedIndices(Map.of(indexName, testInferenceFields), null, Map.of());
+        final QueryRewriteContext queryRewriteContext = new QueryRewriteContext(
+            parserConfig(),
+            null,
+            null,
+            TransportVersion.current(),
+            RemoteClusterAware.LOCAL_CLUSTER_GROUP_KEY,
+            resolvedIndices,
+            new PointInTimeBuilder(new BytesArray("pitid")),
+            null,
+            null
+        );
+
+        RRFRetrieverBuilder rrfRetrieverBuilder = new RRFRetrieverBuilder(
+            null,
+            List.of("field_1", "field_2", "semantic_field_1", "semantic_field_2"),
+            "foo",
+            DEFAULT_RANK_WINDOW_SIZE,
+            RRFRetrieverBuilder.DEFAULT_RANK_CONSTANT,
+            new float[0]
+        );
+        rrfRetrieverBuilder.minScore(0.02f);
+        rrfRetrieverBuilder.retrieverName("my_rrf");
+        assertMultiFieldsParamsRewrite(
+            rrfRetrieverBuilder,
+            queryRewriteContext,
+            Map.of("field_1", 1.0f, "field_2", 1.0f),
+            Map.of("semantic_field_1", 1.0f, "semantic_field_2", 1.0f),
+            "foo"
+        );
+
+        RetrieverBuilder rewritten = rrfRetrieverBuilder.doRewrite(queryRewriteContext);
+        assertThat(rewritten, instanceOf(RRFRetrieverBuilder.class));
+        assertEquals(Float.valueOf(0.02f), rewritten.minScore());
+        assertEquals("my_rrf", rewritten.retrieverName());
+        for (RetrieverSource innerSource : ((RRFRetrieverBuilder) rewritten).innerRetrievers()) {
+            if (innerSource.retriever() instanceof CompoundRetrieverBuilder<?> innerCompound) {
+                assertThat(innerCompound.minScore(), nullValue());
+            }
+        }
+    }
+
+    public void testCloneKeepsMinScoreAndRetrieverName() {
+        RRFRetrieverBuilder rrfRetrieverBuilder = new RRFRetrieverBuilder(
+            List.of(
+                RetrieverSource.from(new StandardRetrieverBuilder(new MatchAllQueryBuilder())),
+                RetrieverSource.from(new StandardRetrieverBuilder(new MatchAllQueryBuilder()))
+            ),
+            DEFAULT_RANK_WINDOW_SIZE,
+            RRFRetrieverBuilder.DEFAULT_RANK_CONSTANT
+        );
+        rrfRetrieverBuilder.minScore(0.02f);
+        rrfRetrieverBuilder.retrieverName("my_rrf");
+
+        RRFRetrieverBuilder clone = rrfRetrieverBuilder.clone(rrfRetrieverBuilder.innerRetrievers(), List.of());
+        assertEquals(Float.valueOf(0.02f), clone.minScore());
+        assertEquals("my_rrf", clone.retrieverName());
+        assertEquals(rrfRetrieverBuilder, clone);
+    }
+
+    /**
+     * With rank_constant 1 and unit weights, the fused scores are:
+     * doc 2: 1/3 + 1/2 (rank 1), doc 1: 1/2 (rank 2), doc 4: 1/3 (rank 3), doc 3: 1/4 (rank 4).
+     */
+    public void testCombineInnerRetrieverResultsAppliesMinScore() {
+        List<ScoreDoc[]> rankResults = List.of(
+            new ScoreDoc[] { new ScoreDoc(1, 10f, 0), new ScoreDoc(2, 9f, 0), new ScoreDoc(3, 8f, 0) },
+            new ScoreDoc[] { new ScoreDoc(2, 5f, 0), new ScoreDoc(4, 4f, 0) }
+        );
+
+        // no min score: every fused document is returned
+        RRFRankDoc[] results = rrfWithMinScore(null).combineInnerRetrieverResults(rankResults, false);
+        assertRankDocs(results, new int[] { 2, 1, 4, 3 }, new int[] { 1, 2, 3, 4 });
+
+        // the threshold is inclusive: doc 1 scores exactly 0.5
+        results = rrfWithMinScore(0.5f).combineInnerRetrieverResults(rankResults, false);
+        assertRankDocs(results, new int[] { 2, 1 }, new int[] { 1, 2 });
+
+        results = rrfWithMinScore(0.3f).combineInnerRetrieverResults(rankResults, randomBoolean());
+        assertRankDocs(results, new int[] { 2, 1, 4 }, new int[] { 1, 2, 3 });
+
+        // a threshold above the highest possible fused score filters every document
+        results = rrfWithMinScore(1f).combineInnerRetrieverResults(rankResults, false);
+        assertEquals(0, results.length);
+    }
+
+    private static RRFRetrieverBuilder rrfWithMinScore(Float minScore) {
+        RRFRetrieverBuilder rrfRetrieverBuilder = new RRFRetrieverBuilder(
+            List.of(
+                RetrieverSource.from(new StandardRetrieverBuilder(new MatchAllQueryBuilder())),
+                RetrieverSource.from(new StandardRetrieverBuilder(new MatchAllQueryBuilder()))
+            ),
+            DEFAULT_RANK_WINDOW_SIZE,
+            1
+        );
+        rrfRetrieverBuilder.minScore(minScore);
+        return rrfRetrieverBuilder;
+    }
+
+    private static void assertRankDocs(RRFRankDoc[] results, int[] expectedDocs, int[] expectedRanks) {
+        assertEquals(expectedDocs.length, results.length);
+        for (int i = 0; i < results.length; i++) {
+            assertEquals(expectedDocs[i], results[i].doc);
+            assertEquals(expectedRanks[i], results[i].rank);
+        }
     }
 
     public void testMultiIndexMultiFieldsParamsRewrite() {

@@ -47,6 +47,7 @@ public class RankRRFFeatures implements FeatureSpecification {
             LINEAR_RETRIEVER_TOP_LEVEL_NORMALIZER,
             LinearRetrieverBuilder.MULTI_INDEX_SIMPLIFIED_FORMAT_SUPPORT,
             RRFRetrieverBuilder.MULTI_INDEX_SIMPLIFIED_FORMAT_SUPPORT,
+            RRFRetrieverBuilder.MIN_SCORE_SUPPORT,
             NESTED_RETRIEVER_MIN_SCORE_TOTAL_HITS_FIX,
             STANDARD_RETRIEVER_FIX_FOR_EMPTY_QUERY_IN_COMPOUND_RETRIEVERS
         );

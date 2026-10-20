@@ -339,6 +339,28 @@ setup:
   - match: { hits.hits.1._id: "3" }
 
 ---
+"Applies min_score using the simplified format":
+  - requires:
+      cluster_features: [ "rrf_retriever.min_score" ]
+      reason: "rrf retriever applies min_score to fused scores"
+
+  - do:
+      search:
+        index: test-index
+        body:
+          retriever:
+            rrf:
+              fields: [ "text_1", "text_2" ]
+              query: "foo z"
+              rank_constant: 1
+              # fused scores: doc 1 = 1/2, doc 3 = 1/3
+              min_score: 0.4
+
+  - match: { hits.total.value: 1 }
+  - length: { hits.hits: 1 }
+  - match: { hits.hits.0._id: "1" }
+
+---
 "Can query semantic text fields":
   # Result order is not correlated with relevance because we generate synthetic embeddings
   - do:
