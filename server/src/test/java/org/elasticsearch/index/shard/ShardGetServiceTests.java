@@ -624,8 +624,9 @@ public class ShardGetServiceTests extends IndexShardTestCase {
     }
 
     /**
-     * A GET returns the {@code _ignored} metadata field by default when the document has ignored fields, whether the document is read
-     * from the translog or from a refreshed segment, and also when other stored fields are requested. Get-for-update does not load it.
+     * A GET returns the {@code _ignored} metadata field by default when the document has ignored fields and is read from a
+     * segment, also when other stored fields are requested. A realtime get served from the translog returns it only when
+     * {@code stored_fields} names it. Get-for-update does not load it.
      */
     public void testGetReturnsIgnoredMetadataFieldByDefault() throws IOException {
         runGetReturnsIgnoredMetadataFieldByDefault(IndexVersion.current());
@@ -673,11 +674,11 @@ public class ShardGetServiceTests extends IndexShardTestCase {
             try (Engine.Searcher searcher = primary.getEngine().acquireSearcher("test", Engine.SearcherScope.INTERNAL)) {
                 assertEquals(1, searcher.getIndexReader().maxDoc()); // read from the translog
             }
-            // Indices that keep _ignored as a stored field serve a translog read that needs only _source and _routing without
-            // parsing the document, so on those indices _ignored is returned for documents read from a segment.
-            final boolean ignoredInDocValues = indexVersion.onOrAfter(IndexVersions.DOC_VALUES_FOR_IGNORED_META_FIELD);
-            if (ignoredInDocValues) {
-                assertIgnoredFields(fromTranslog);
+            // a default translog read needs only _source and _routing and does not index the operation into a segment
+            assertFalse(fromTranslog.getMetadataFields().containsKey(IgnoredFieldMapper.NAME));
+            if (indexVersion.onOrAfter(IndexVersions.DOC_VALUES_FOR_IGNORED_META_FIELD)) {
+                // asking for _ignored indexes the operation into an in-memory segment and reads its doc values
+                assertIgnoredFields(get(primary, "1", new String[] { IgnoredFieldMapper.NAME }));
             }
 
             GetResult fromTranslogOnly = primary.getService()
@@ -694,9 +695,7 @@ public class ShardGetServiceTests extends IndexShardTestCase {
                     false
                 );
             assertNotNull(fromTranslogOnly);
-            if (ignoredInDocValues) {
-                assertIgnoredFields(fromTranslogOnly);
-            }
+            assertFalse(fromTranslogOnly.getMetadataFields().containsKey(IgnoredFieldMapper.NAME));
 
             GetResult forUpdate = getForUpdate(primary, "1", UNASSIGNED_SEQ_NO, UNASSIGNED_PRIMARY_TERM);
             assertFalse(forUpdate.getMetadataFields().containsKey(IgnoredFieldMapper.NAME));

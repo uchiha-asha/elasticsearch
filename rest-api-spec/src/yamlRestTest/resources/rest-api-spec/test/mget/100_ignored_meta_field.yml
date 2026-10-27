@@ -41,6 +41,7 @@
       index:
         index:   test
         id:      3
+        refresh: true
         body:
           keyword: foo
           value: ops

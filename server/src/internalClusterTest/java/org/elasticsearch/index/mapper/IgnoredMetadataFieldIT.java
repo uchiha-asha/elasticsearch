@@ -126,16 +126,10 @@ public class IgnoredMetadataFieldIT extends ESSingleNodeTestCase {
             .get();
         assertEquals(List.of(NUMERIC_FIELD_NAME), wrongWithStoredFields.getField(IgnoredFieldMapper.NAME).getValues());
 
-        // indexed without a refresh, so only a realtime get sees it
-        DocWriteResponse unrefreshed = client().prepareIndex(TEST_INDEX).setId("wrong-date").setSource(DATE_FIELD_NAME, "today").get();
-        try {
-            assertEquals(RestStatus.CREATED, unrefreshed.status());
-        } finally {
-            unrefreshed.decRef();
-        }
-        GetResponse realtime = client().prepareGet(TEST_INDEX, "wrong-date").get();
-        assertTrue(realtime.isExists());
-        assertEquals(List.of(DATE_FIELD_NAME), realtime.getField(IgnoredFieldMapper.NAME).getValues());
+        indexTestDoc(DATE_FIELD_NAME, "wrong-date", "today");
+        GetResponse wrongDate = client().prepareGet(TEST_INDEX, "wrong-date").get();
+        assertTrue(wrongDate.isExists());
+        assertEquals(List.of(DATE_FIELD_NAME), wrongDate.getField(IgnoredFieldMapper.NAME).getValues());
 
         MultiGetResponse multiGet = client().prepareMultiGet()
             .add(TEST_INDEX, CORRECT_FIELD_TYPE_DOC_ID)
