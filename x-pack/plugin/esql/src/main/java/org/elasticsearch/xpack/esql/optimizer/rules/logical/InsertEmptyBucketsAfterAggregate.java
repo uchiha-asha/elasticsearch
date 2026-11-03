@@ -73,15 +73,20 @@ public final class InsertEmptyBucketsAfterAggregate extends OptimizerRules.Optim
             : new InsertEmptyBuckets(aggregate.source(), aggregate, buckets, groups, defaultValues(aggregate, buckets, groups));
     }
 
-    private static AttributeMap<Expression> collectAliases(Aggregate aggregate) {
+    /**
+     * The aliases defined in {@code plan} and below it, down to and including the first {@link Aggregate} and its input,
+     * but not past a further {@link Aggregate}. Resolving a grouping attribute of that first {@link Aggregate} against
+     * them gives the grouping's current expression, such as its {@link Bucket}.
+     */
+    static AttributeMap<Expression> collectAliases(LogicalPlan plan) {
         AttributeMap.Builder<Expression> aliasesBuilder = AttributeMap.builder();
-        aggregate.forEachExpression(Alias.class, a -> aliasesBuilder.put(a.toAttribute(), a.child()));
-        collectAliases(aggregate.child(), aliasesBuilder);
+        collectAliases(plan, aliasesBuilder, false);
         return aliasesBuilder.build();
     }
 
-    private static void collectAliases(LogicalPlan plan, AttributeMap.Builder<Expression> aliasesBuilder) {
-        if (plan instanceof Aggregate && plan instanceof TimeSeriesAggregate == false) {
+    private static void collectAliases(LogicalPlan plan, AttributeMap.Builder<Expression> aliasesBuilder, boolean belowAggregate) {
+        boolean isAggregate = plan instanceof Aggregate && plan instanceof TimeSeriesAggregate == false;
+        if (isAggregate && belowAggregate) {
             // Stop at any Aggregate beyond the original one: any "include_empty_buckets" belongs to
             // that Aggregate, and not to the one currently being processed.
             // Do continue processing a TimeSeriesAggregate, which is this Aggregate's "sibling".
@@ -89,7 +94,7 @@ public final class InsertEmptyBucketsAfterAggregate extends OptimizerRules.Optim
         }
         plan.forEachExpression(Alias.class, a -> aliasesBuilder.put(a.toAttribute(), a.child()));
         for (LogicalPlan child : plan.children()) {
-            collectAliases(child, aliasesBuilder);
+            collectAliases(child, aliasesBuilder, belowAggregate || isAggregate);
         }
     }
 

@@ -71,6 +71,7 @@ import org.elasticsearch.xpack.esql.optimizer.rules.logical.ReplaceAggregateNest
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.ReplaceAliasingEvalWithProject;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.ReplaceChangePointByExpressionWithEval;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.ReplaceDeferredRegex;
+import org.elasticsearch.xpack.esql.optimizer.rules.logical.ReplaceInvalidBucketBounds;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.ReplaceLimitAndSortAsTopN;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.ReplaceLimitByExpressionWithEval;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.ReplaceOrderByExpressionWithEval;
@@ -237,6 +238,8 @@ public class LogicalPlanOptimizer extends ParameterizedRuleExecutor<LogicalPlan,
             new CombineProjections(),
             new CombineEvals(),
             new PropagateEmptyRelation(),
+            // must run before FoldNull, which turns a BUCKET with a null bound into a null without a warning
+            new ReplaceInvalidBucketBounds(),
             new FoldNull(),
             new SplitInWithFoldableValue(),
             new PropagateEvalFoldables(),

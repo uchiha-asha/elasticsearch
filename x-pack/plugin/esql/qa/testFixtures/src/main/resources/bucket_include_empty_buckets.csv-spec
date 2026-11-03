@@ -578,8 +578,9 @@ hires_per_month:long | bucket:datetime
 ;
 
 
-Negative date range generates all non-empty buckets
+Negative date range returns null
 required_capability: bucket_include_empty_buckets
+required_capability: fn_bucket_invalid_bounds_warning
 
 FROM employees
 | STATS hires_per_month = COUNT(*)
@@ -587,19 +588,16 @@ FROM employees
 | LIMIT 5
 ;
 
-// BUCKET produces no empty buckets, so expect the same result as with {"include_empty_buckets":false}
+warning:Line 3:13: [BUCKET(hire_date, 20, \"1985-01-01T00:00:00Z\", \"1984-01-01T00:00:00Z\", {\"include_empty_buckets\": true})] has invalid bounds: [to] [1984-01-01T00:00:00.000Z] must not be before [from] [1985-01-01T00:00:00.000Z]; returning null
 
 hires_per_month:long | bucket:date
-1                    | 1985-02-18T00:00:00.000Z
-1                    | 1985-02-24T00:00:00.000Z
-1                    | 1985-05-13T00:00:00.000Z
-1                    | 1985-07-09T00:00:00.000Z
-1                    | 1985-09-17T00:00:00.000Z
+100                  | null
 ;
 
 
-Zero-width numeric range generates degenerate bucket
+Zero-width numeric range returns null
 required_capability: bucket_include_empty_buckets
+required_capability: fn_bucket_invalid_bounds_warning
 
 FROM employees
 | STATS count = COUNT(*)
@@ -607,18 +605,16 @@ FROM employees
 | WHERE count > 0
 ;
 
-// BUCKET produces no empty buckets, so expect the same result as with {"include_empty_buckets":false}
-
-warning:Line 3:13: evaluation of [BUCKET(salary, 10, 100, 100, {\"include_empty_buckets\": true})] failed, treating result as null. Only first 20 failures recorded.
-warning:Line 3:13: java.lang.ArithmeticException: / by zero
+warning:Line 3:13: [BUCKET(salary, 10, 100, 100, {\"include_empty_buckets\": true})] has invalid bounds: [to] [100] must be greater than [from] [100]; returning null
 
 count:long | bucket:double
 100        | null
 ;
 
 
-Negative numeric range generates degenerate bucket
+Negative numeric range returns null
 required_capability: bucket_include_empty_buckets
+required_capability: fn_bucket_invalid_bounds_warning
 
 FROM employees
 | STATS count = COUNT(*)
@@ -626,10 +622,7 @@ FROM employees
 | WHERE count > 0
 ;
 
-// BUCKET produces no empty buckets, so expect the same result as with {"include_empty_buckets":false}
-
-warning:Line 3:13: evaluation of [BUCKET(salary, 10, 100, -100, {\"include_empty_buckets\": true})] failed, treating result as null. Only first 20 failures recorded.
-warning:Line 3:13: java.lang.ArithmeticException: not a finite double number: NaN
+warning:Line 3:13: [BUCKET(salary, 10, 100, -100, {\"include_empty_buckets\": true})] has invalid bounds: [to] [-100] must be greater than [from] [100]; returning null
 
 count:long | bucket:double
 100        | null
@@ -935,4 +928,88 @@ c:long | b:double
 0      | 60.0
 0      | 70.0
 21     | null
+;
+
+
+Propagated null bound returns null
+required_capability: bucket_include_empty_buckets
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| EVAL t = null::datetime
+| STATS c = COUNT(*) BY month = BUCKET(hire_date, 4, "1985-01-01T00:00:00Z", t, {"include_empty_buckets": true})
+;
+warning:Line 3:33: [BUCKET(hire_date, 4, \"1985-01-01T00:00:00Z\", t, {\"include_empty_buckets\": true})] has invalid bounds: [to] is null; returning null
+
+c:long | month:datetime
+100    | null
+;
+
+
+Null literal bound returns null
+required_capability: bucket_include_empty_buckets
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| STATS c = COUNT(*) BY b = BUCKET(salary, 10, NULL, 100000, {"include_empty_buckets": true})
+;
+warning:Line 2:29: Expression [BUCKET(salary, 10, NULL, 100000, {\"include_empty_buckets\": true})] always evaluates to NULL.
+warning:Line 2:29: [BUCKET(salary, 10, NULL, 100000, {\"include_empty_buckets\": true})] has invalid bounds: [from] is null; returning null
+
+c:long | b:double
+100    | null
+;
+
+
+Negative date range with span inserts no empty buckets
+required_capability: bucket_include_empty_buckets
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| WHERE hire_date < "1985-06-01T00:00:00Z"
+| STATS c = COUNT(*) BY month = BUCKET(hire_date, 1 month, "1985-06-01T00:00:00Z", "1985-01-01T00:00:00Z", {"include_empty_buckets": true})
+| SORT month
+;
+warning:Line 3:33: [BUCKET(hire_date, 1 month, \"1985-06-01T00:00:00Z\", \"1985-01-01T00:00:00Z\", {\"include_empty_buckets\": true})] has invalid bounds: [to] [1985-01-01T00:00:00.000Z] must not be before [from] [1985-06-01T00:00:00.000Z]; empty buckets are not inserted
+
+c:long | month:datetime
+2      | 1985-02-01T00:00:00.000Z
+1      | 1985-05-01T00:00:00.000Z
+;
+
+
+Invalid bucket next to a valid bucket
+required_capability: bucket_include_empty_buckets
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| WHERE hire_date < "1985-03-01T00:00:00Z"
+| STATS c = COUNT(*) BY month = BUCKET(hire_date, 4, "1985-01-01T00:00:00Z", "1985-05-01T00:00:00Z", {"include_empty_buckets": true}), b = BUCKET(salary, 10, 100, 100, {"include_empty_buckets": true})
+| SORT month
+;
+warning:Line 3:140: [BUCKET(salary, 10, 100, 100, {\"include_empty_buckets\": true})] has invalid bounds: [to] [100] must be greater than [from] [100]; returning null
+
+c:long | month:datetime           | b:double
+0      | 1985-01-01T00:00:00.000Z | null
+2      | 1985-02-01T00:00:00.000Z | null
+0      | 1985-03-01T00:00:00.000Z | null
+0      | 1985-04-01T00:00:00.000Z | null
+;
+
+
+Propagated bounds insert empty buckets
+required_capability: bucket_include_empty_buckets
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| WHERE hire_date >= "1985-01-01T00:00:00Z" AND hire_date < "1985-05-01T00:00:00Z"
+| EVAL f = "1985-01-01T00:00:00Z", t = "1985-05-01T00:00:00Z"
+| STATS c = COUNT(*) BY month = BUCKET(hire_date, 4, f, t, {"include_empty_buckets": true})
+;
+
+c:long | month:datetime
+0      | 1985-01-01T00:00:00.000Z
+2      | 1985-02-01T00:00:00.000Z
+0      | 1985-03-01T00:00:00.000Z
+0      | 1985-04-01T00:00:00.000Z
 ;

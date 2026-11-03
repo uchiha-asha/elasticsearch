@@ -2625,6 +2625,7 @@ public class LocalExecutionPlanner {
     }
 
     private static InsertEmptyBucketsOperator.BucketCursorFactory bucketCursorFactory(Bucket bucket, FoldContext foldCtx) {
+        assert bucket.invalidBounds(foldCtx) == null : "invalid bounds must be removed before planning: " + bucket.invalidBounds(foldCtx);
         return switch (bucket.dataType()) {
             case DATETIME, DATE_NANOS -> new InsertEmptyBucketsOperator.DateCursorFactory(
                 bucket.getDateRoundingOrNull(foldCtx),

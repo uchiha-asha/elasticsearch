@@ -12,7 +12,7 @@
 :   Start of the range. Can be a number, a date or a date expressed as a string.
 
 `to`
-:   End of the range. Can be a number, a date or a date expressed as a string.
+:   End of the range. Can be a number, a date or a date expressed as a string. If `from` or `to` is null, `BUCKET` returns null and adds a warning. With a target number of buckets, it also does so if `to` is not greater than `from` for numbers, or is before `from` for dates.
 
 `options` {applies_to}`{"serverless": "ga", "stack": "ga 9.6.0"}`
 :   (Optional) Additional options as [function named parameters](/reference/query-languages/esql/esql-syntax.md#esql-function-named-params).

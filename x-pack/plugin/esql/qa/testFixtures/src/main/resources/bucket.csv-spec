@@ -638,11 +638,11 @@ ROW long = TO_LONG(100), double = 99., int = 100
 
 zeroBucketsRow
 required_capability: fix_div_error_message
+required_capability: fn_bucket_invalid_bounds_warning
 ROW a = 1
 | STATS max = max(a) BY b = BUCKET(a, 0, 0, 0)
 ;
-warningRegex:evaluation of \[BUCKET\(a, 0, 0, 0\)\] failed, treating result as null. Only first 20 failures recorded
-warningRegex:java.lang.ArithmeticException: not a finite double number: NaN
+warning:Line 2:29: [BUCKET(a, 0, 0, 0)] has invalid bounds: [to] [0] must be greater than [from] [0]; returning null
 
 max:integer | b:double
 1          | null
@@ -651,11 +651,11 @@ max:integer | b:double
 
 zeroBuckets
 required_capability: fix_div_error_message
+required_capability: fn_bucket_invalid_bounds_warning
 FROM employees
 | STATS max = max(salary) BY b = BUCKET(salary, 0, 0, 0)
 ;
-warningRegex:evaluation of \[BUCKET\(salary, 0, 0, 0\)\] failed, treating result as null. Only first 20 failures recorded
-warningRegex:java.lang.ArithmeticException: not a finite double number: NaN
+warning:Line 2:34: [BUCKET(salary, 0, 0, 0)] has invalid bounds: [to] [0] must be greater than [from] [0]; returning null
 
 max:integer | b:double
 74999       | null
@@ -674,11 +674,11 @@ max:integer | b:double
 ;
 
 minusOneBucketsRow
+required_capability: fn_bucket_invalid_bounds_warning
 ROW a = 1
 | STATS max = max(a) BY b = BUCKET(a, -1, 0, 0)
 ;
-warningRegex:evaluation of \[BUCKET\(a, -1, 0, 0\)\] failed, treating result as null. Only first 20 failures recorded
-warningRegex:java.lang.ArithmeticException: / by zero
+warning:Line 2:29: [BUCKET(a, -1, 0, 0)] has invalid bounds: [to] [0] must be greater than [from] [0]; returning null
 
 max:integer | b:double
 1          | null
@@ -686,11 +686,11 @@ max:integer | b:double
 
 
 minusOneBuckets
+required_capability: fn_bucket_invalid_bounds_warning
 FROM employees
 | STATS max = max(salary) BY b = BUCKET(salary, -1, 0, 0)
 ;
-warningRegex:evaluation of \[BUCKET\(salary, -1, 0, 0\)\] failed, treating result as null. Only first 20 failures recorded
-warningRegex:java.lang.ArithmeticException: / by zero
+warning:Line 2:34: [BUCKET(salary, -1, 0, 0)] has invalid bounds: [to] [0] must be greater than [from] [0]; returning null
 
 max:integer | b:double
 74999       | null
@@ -698,11 +698,11 @@ max:integer | b:double
 
 
 tooManyBucketsRow
+required_capability: fn_bucket_invalid_bounds_warning
 ROW a = 1
 | STATS max = max(a) BY b = BUCKET(a, 100000000000, 0, 0)
 ;
-warningRegex:evaluation of \[BUCKET\(a, 100000000000, 0, 0\)\] failed, treating result as null. Only first 20 failures recorded
-warningRegex:java.lang.ArithmeticException: / by zero
+warning:Line 2:29: [BUCKET(a, 100000000000, 0, 0)] has invalid bounds: [to] [0] must be greater than [from] [0]; returning null
 
 max:integer | b:double
 1          | null
@@ -710,11 +710,11 @@ max:integer | b:double
 
 
 tooManyBuckets
+required_capability: fn_bucket_invalid_bounds_warning
 FROM employees
 | STATS max = max(salary) BY b = BUCKET(salary, 100000000000, 0, 0)
 ;
-warningRegex:evaluation of \[BUCKET\(salary, 100000000000, 0, 0\)\] failed, treating result as null. Only first 20 failures recorded
-warningRegex:java.lang.ArithmeticException: / by zero
+warning:Line 2:34: [BUCKET(salary, 100000000000, 0, 0)] has invalid bounds: [to] [0] must be greater than [from] [0]; returning null
 
 max:integer | b:double
 74999       | null
@@ -1111,4 +1111,86 @@ ROW ts = 123::datetime
 
 c:long | b:datetime
 1      | 1970-01-01T00:00:00.120Z
+;
+
+
+invalidBoundsNumericToBeforeFrom
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| STATS c = COUNT(*) BY b = BUCKET(salary, 10, 50000, 10000)
+;
+warning:Line 2:29: [BUCKET(salary, 10, 50000, 10000)] has invalid bounds: [to] [10000] must be greater than [from] [50000]; returning null
+
+c:long | b:double
+100    | null
+;
+
+
+invalidBoundsNumericEmptyRange
+required_capability: fn_bucket_invalid_bounds_warning
+
+ROW v = [5.0, 5.0, 5.0]
+| MV_EXPAND v
+| STATS c = COUNT(*) BY b = BUCKET(v, 10, 5.0, 5.0)
+;
+warning:Line 3:29: [BUCKET(v, 10, 5.0, 5.0)] has invalid bounds: [to] [5.0] must be greater than [from] [5.0]; returning null
+
+c:long | b:double
+3      | null
+;
+
+
+invalidBoundsDateToBeforeFrom
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| STATS c = COUNT(*) BY b = BUCKET(hire_date, 10, "1986-01-01T00:00:00Z", "1985-01-01T00:00:00Z")
+;
+warning:Line 2:29: [BUCKET(hire_date, 10, \"1986-01-01T00:00:00Z\", \"1985-01-01T00:00:00Z\")] has invalid bounds: [to] [1985-01-01T00:00:00.000Z] must not be before [from] [1986-01-01T00:00:00.000Z]; returning null
+
+c:long | b:datetime
+100    | null
+;
+
+
+invalidBoundsDateEmptyRangeIsValid
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| WHERE hire_date < "1985-03-01T00:00:00Z"
+| STATS c = COUNT(*) BY b = BUCKET(hire_date, 20, "1985-01-01T00:00:00Z", "1985-01-01T00:00:00Z")
+;
+
+c:long | b:datetime
+1      | 1985-02-18T00:00:00.000Z
+1      | 1985-02-24T00:00:00.000Z
+;
+
+
+invalidBoundsPropagatedNull
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| EVAL t = null::datetime
+| STATS c = COUNT(*) BY b = BUCKET(hire_date, 10, "1985-01-01T00:00:00Z", t)
+;
+warning:Line 3:29: [BUCKET(hire_date, 10, \"1985-01-01T00:00:00Z\", t)] has invalid bounds: [to] is null; returning null
+
+c:long | b:datetime
+100    | null
+;
+
+
+invalidBoundsNullLiteral
+required_capability: fn_bucket_invalid_bounds_warning
+
+FROM employees
+| STATS c = COUNT(*) BY b = BUCKET(salary, 10, NULL, 100000)
+;
+warning:Line 2:29: Expression [BUCKET(salary, 10, NULL, 100000)] always evaluates to NULL.
+warning:Line 2:29: [BUCKET(salary, 10, NULL, 100000)] has invalid bounds: [from] is null; returning null
+
+c:long | b:double
+100    | null
 ;

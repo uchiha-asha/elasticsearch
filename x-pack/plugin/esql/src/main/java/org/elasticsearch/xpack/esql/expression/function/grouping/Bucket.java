@@ -82,6 +82,7 @@ import static org.elasticsearch.xpack.esql.core.expression.TypeResolutions.isNum
 import static org.elasticsearch.xpack.esql.core.expression.TypeResolutions.isType;
 import static org.elasticsearch.xpack.esql.expression.Validations.isFoldable;
 import static org.elasticsearch.xpack.esql.type.EsqlDataTypeConverter.dateTimeToLong;
+import static org.elasticsearch.xpack.esql.type.EsqlDataTypeConverter.dateTimeToString;
 
 /**
  * Splits dates and numbers into a given number of buckets. There are two ways to invoke
@@ -105,7 +106,7 @@ public class Bucket extends GroupingFunction.EvaluatableGroupingFunction
     public static final NamedWriteableRegistry.Entry ENTRY = new NamedWriteableRegistry.Entry(Expression.class, "Bucket", Bucket::new);
     public static final FunctionDefinition DEFINITION = FunctionDefinition.def(Bucket.class)
         .quinaryConfigWithOptions(Bucket::new)
-        .capabilities("histogram_types")
+        .capabilities("histogram_types", "invalid_bounds_warning")
         .name("bucket", "bin");
     public static final TransportVersion ESQL_BUCKET_OFFSET = TransportVersion.fromName("esql_bucket_offset");
     public static final TransportVersion ESQL_SUPPORT_EXPLICIT_BUCKET_ROUNDING_CONFIGURATION = TransportVersion.fromName(
@@ -538,7 +539,9 @@ public class Bucket extends GroupingFunction.EvaluatableGroupingFunction
             type = { "integer", "long", "double", "date", "keyword", "text" },
             hint = @Param.Hint(kind = Param.Hint.Kind.CONSTANT),
             optional = true,
-            description = "End of the range. Can be a number, a date or a date expressed as a string."
+            description = "End of the range. Can be a number, a date or a date expressed as a string. "
+                + "If `from` or `to` is null, `BUCKET` returns null and adds a warning. With a target number of buckets, "
+                + "it also does so if `to` is not greater than `from` for numbers, or is before `from` for dates."
         ) Expression to,
         @MapParam(
             name = "options",
@@ -549,6 +552,7 @@ public class Bucket extends GroupingFunction.EvaluatableGroupingFunction
                     valueHint = { "true", "false" },
                     description = "When `true`, empty buckets (filled with default aggregate values) are output across the "
                         + "`from`..`to` range (`from` inclusive, `to` exclusive). Requires the four-argument (range) form of `BUCKET`. "
+                        + "If `to` is before `from`, no empty buckets are output and a warning is added. "
                         + "Defaults to `false`.",
                     applies_to = OPTIONS_APPLIES_TO
                 ) },
@@ -872,6 +876,7 @@ public class Bucket extends GroupingFunction.EvaluatableGroupingFunction
      * The numeric bucket width: buckets are the multiples of this value.
      */
     public double getNumberRoundTo(FoldContext foldContext) {
+        assert invalidBounds(foldContext) == null : "invalid bounds must be replaced before planning: " + invalidBounds(foldContext);
         if (from != null) {
             assert to != null : "Both from and to must be set";
             long b = ((Number) buckets.fold(foldContext)).longValue();
@@ -1022,6 +1027,61 @@ public class Bucket extends GroupingFunction.EvaluatableGroupingFunction
             .add(to != null ? isFoldable(to, operation, FOURTH) : null);
     }
 
+    /**
+     * Checks the {@code from}..{@code to} range of the four-argument form. A range with a null bound, a non-finite numeric
+     * bound, a numeric {@code to} that is not greater than {@code from}, or a date {@code to} before {@code from} has no
+     * meaningful buckets. The optimizer rule {@code ReplaceInvalidBucketBounds} turns such a range into a warning, so
+     * the range is never evaluated.
+     *
+     * @return {@code null} if the range is valid, if there is no range, or if a bound is not foldable (which
+     *         {@link #postOptimizationVerification} reports); otherwise why the range is invalid, for use in a warning
+     */
+    public String invalidBounds(FoldContext ctx) {
+        if (from == null || to == null || from.foldable() == false || to.foldable() == false) {
+            return null;
+        }
+        Object fromValue = Foldables.valueOf(ctx, from);
+        if (fromValue == null) {
+            return "[from] is null";
+        }
+        Object toValue = Foldables.valueOf(ctx, to);
+        if (toValue == null) {
+            return "[to] is null";
+        }
+        DataType fieldType = field.dataType();
+        if (fieldType == DataType.DATETIME || fieldType == DataType.DATE_NANOS) {
+            long fromMillis;
+            long toMillis;
+            try {
+                fromMillis = foldToLong(ctx, from);
+                toMillis = foldToLong(ctx, to);
+            } catch (IllegalArgumentException e) {
+                // An unparseable date string is reported when the rounding is built, as for any other range.
+                return null;
+            }
+            if (toMillis < fromMillis) {
+                return format(null, "[to] [{}] must not be before [from] [{}]", dateTimeToString(toMillis), dateTimeToString(fromMillis));
+            }
+            return null;
+        }
+        if ((fieldType.isNumeric() || isSupportedHistogramType(fieldType))
+            && fromValue instanceof Number fromNumber
+            && toValue instanceof Number toNumber) {
+            double f = fromNumber.doubleValue();
+            double t = toNumber.doubleValue();
+            if (Double.isFinite(f) == false) {
+                return format(null, "[from] [{}] is not a finite number", fromValue);
+            }
+            if (Double.isFinite(t) == false) {
+                return format(null, "[to] [{}] is not a finite number", toValue);
+            }
+            if (t <= f) {
+                return format(null, "[to] [{}] must be greater than [from] [{}]", toValue, fromValue);
+            }
+        }
+        return null;
+    }
+
     private long foldToLong(FoldContext ctx, Expression e) {
         Object value = Foldables.valueOf(ctx, e);
         if (DataType.isDateTime(e.dataType())) {
@@ -1156,9 +1216,9 @@ public class Bucket extends GroupingFunction.EvaluatableGroupingFunction
         }
         if (fieldType.isNumeric() || isSupportedHistogramType(fieldType)) {
             double roundTo = getNumberRoundTo(foldContext);
-            // Impossible bucket configurations (zero/negative buckets count, zero/inverted ranges) yield NaN,
-            // ±Infinity, or non-positive widths. Skip metadata emission in those cases — the query itself fails
-            // at runtime, and surfacing garbage values on the column descriptor would be misleading.
+            // Impossible bucket counts (zero or negative) yield NaN, ±Infinity, or non-positive widths. Skip metadata
+            // emission in those cases — the query itself fails at runtime, and surfacing garbage values on the column
+            // descriptor would be misleading.
             if (Double.isFinite(roundTo) == false || roundTo <= 0.0) {
                 return null;
             }
