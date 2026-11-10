@@ -24,6 +24,7 @@ import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
@@ -1203,7 +1204,15 @@ public class SearchQueryThenFetchAsyncAction extends AbstractSearchAsyncAction<S
                         }
                     }
                 }
-                bottomSortCollector.consumeTopDocs(topDocs, queryResult.sortValueFormats());
+                try {
+                    bottomSortCollector.consumeTopDocs(topDocs, queryResult.sortValueFormats());
+                } catch (Exception e) {
+                    // The result never reaches the consumer, so none of the consumer's release paths free its reader context.
+                    // The caller records the shard as failed.
+                    logger.warn(() -> Strings.format("failed to consume top docs for shard [%s]", queryResult.getSearchShardTarget()), e);
+                    releaseLocalContext(dependencies.searchService, searchRequest, queryResult, namedWriteableRegistry);
+                    throw e;
+                }
             }
             queryPhaseResultConsumer.consumeResult(queryResult, this::onShardDone);
         }

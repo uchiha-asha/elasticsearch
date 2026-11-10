@@ -34,6 +34,7 @@ import org.elasticsearch.common.breaker.NoopCircuitBreaker;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.lucene.search.TopDocsAndMaxScore;
 import org.elasticsearch.common.settings.ClusterSettings;
@@ -86,6 +87,7 @@ import org.elasticsearch.transport.TransportService;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1350,6 +1352,183 @@ public class SearchQueryThenFetchAsyncActionTests extends ESTestCase {
             resultsToRelease.forEach(QuerySearchResult::decRef);
             assertTrue("channel was not responded to within 10 seconds", completed);
             return channel;
+        } finally {
+            IOUtils.closeWhileHandlingException(searchService, clusterService, transport, threadPool);
+        }
+    }
+
+    /**
+     * A shard whose bottom sort values cannot be formatted is reported as failed, and its reader context is freed.
+     */
+    public void testBottomSortFormattingFailureReleasesReaderContext() throws Exception {
+        int shards = randomIntBetween(1, 3);
+        ShardSearchContextId[] contextIds = new ShardSearchContextId[shards];
+        for (int i = 0; i < shards; i++) {
+            contextIds[i] = new ShardSearchContextId(UUIDs.randomBase64UUID(), i);
+        }
+        List<ShardSearchContextId> freed = runBatchedNodeQueryWithBadBottomSortFormat(contextIds, null);
+        assertThat(freed, containsInAnyOrder(contextIds));
+    }
+
+    /**
+     * A shard whose bottom sort values cannot be formatted is reported as failed, and its reader context stays open when it
+     * belongs to the request's point in time.
+     */
+    public void testBottomSortFormattingFailureKeepsPitReaderContext() throws Exception {
+        int shards = randomIntBetween(1, 3);
+        ShardSearchContextId[] contextIds = new ShardSearchContextId[shards];
+        Map<ShardId, SearchContextIdForNode> pitShards = new HashMap<>();
+        for (int i = 0; i < shards; i++) {
+            contextIds[i] = new ShardSearchContextId(UUIDs.randomBase64UUID(), i);
+            pitShards.put(new ShardId("idx", "uuid", i), new SearchContextIdForNode(null, "node", contextIds[i]));
+        }
+        BytesReference pit = SearchContextId.encode(
+            pitShards,
+            Collections.emptyMap(),
+            TransportVersion.current(),
+            ShardSearchFailure.EMPTY_ARRAY
+        );
+        List<ShardSearchContextId> freed = runBatchedNodeQueryWithBadBottomSortFormat(contextIds, pit);
+        assertThat(freed, empty());
+    }
+
+    /**
+     * Runs a sorted request with {@code size(1)} through the batched query handler of a node whose shard {@code i} returns one hit
+     * held by {@code contextIds[i]}, with a sort value that {@link BadRawDocValueFormat} cannot format. Asserts that every shard is
+     * reported as failed and returns the reader contexts the node freed.
+     */
+    private List<ShardSearchContextId> runBatchedNodeQueryWithBadBottomSortFormat(ShardSearchContextId[] contextIds, BytesReference pit)
+        throws Exception {
+        int shards = contextIds.length;
+        TestThreadPool threadPool = new TestThreadPool(getTestName());
+        var innerTransport = MockTransportService.newMockTransport(Settings.EMPTY, TransportVersion.current(), threadPool);
+        String nodeId = UUIDs.randomBase64UUID();
+        MockTransportService transport = new MockTransportService(
+            Settings.EMPTY,
+            innerTransport,
+            threadPool,
+            TransportService.NOOP_TRANSPORT_INTERCEPTOR,
+            boundAddress -> DiscoveryNodeUtils.builder(nodeId)
+                .address(boundAddress.publishAddress())
+                .version(VersionInformation.CURRENT)
+                .build(),
+            null,
+            Collections.emptySet(),
+            nodeId
+        );
+        ClusterService clusterService = new ClusterService(
+            Settings.EMPTY,
+            new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS),
+            threadPool,
+            null
+        );
+        List<QuerySearchResult> resultsToRelease = Collections.synchronizedList(new ArrayList<>());
+        List<ShardSearchContextId> freed = Collections.synchronizedList(new ArrayList<>());
+        // The query phase is stubbed, so no reader context is registered with the service; recording the free calls is enough to
+        // tell which contexts the handler released.
+        SearchService searchService = new SearchService(
+            clusterService,
+            null,
+            threadPool,
+            null,
+            null,
+            new FetchPhase(Collections.emptyList()),
+            newLimitedBreakerService(ByteSizeValue.ofMb(10)),
+            EmptySystemIndices.INSTANCE.getExecutorSelector(),
+            Tracer.NOOP,
+            OnlinePrewarmingService.NOOP,
+            transport.getTaskManager()
+        ) {
+            @Override
+            public void executeQueryPhase(ShardSearchRequest req, CancellableTask task, ActionListener<SearchPhaseResult> listener) {
+                QuerySearchResult result = new QuerySearchResult(
+                    contextIds[req.shardId().id()],
+                    new SearchShardTarget(transport.getLocalNode().getId(), req.shardId(), null),
+                    null
+                );
+                result.topDocs(
+                    new TopDocsAndMaxScore(
+                        new TopFieldDocs(
+                            new TotalHits(1, TotalHits.Relation.EQUAL_TO),
+                            new FieldDoc[] { new FieldDoc(0, Float.NaN, new Object[] { Long.MAX_VALUE }) },
+                            new SortField[] { new SortField("timestamp", SortField.Type.LONG) }
+                        ),
+                        Float.NaN
+                    ),
+                    new DocValueFormat[] { new BadRawDocValueFormat() }
+                );
+                result.from(0);
+                result.size(1);
+                resultsToRelease.add(result);
+                listener.onResponse(result);
+            }
+
+            @Override
+            public boolean freeReaderContext(ShardSearchContextId contextId) {
+                freed.add(contextId);
+                return false;
+            }
+        };
+        try {
+            transport.start();
+            SearchQueryThenFetchAsyncAction.registerNodeSearchAction(
+                new SearchTransportService(transport, null, null),
+                searchService,
+                new SearchPhaseController((t, r) -> InternalAggregationTestCase.emptyReduceContextBuilder()),
+                new NamedWriteableRegistry(List.of())
+            );
+
+            SearchRequest searchRequest = new SearchRequest();
+            SearchSourceBuilder source = new SearchSourceBuilder().size(1).sort(SortBuilders.fieldSort("timestamp"));
+            if (pit != null) {
+                source.pointInTimeBuilder(new PointInTimeBuilder(pit));
+            }
+            searchRequest.source(source);
+            searchRequest.allowPartialSearchResults(true);
+            var nodeQueryRequest = new SearchQueryThenFetchAsyncAction.NodeQueryRequest(searchRequest, shards, 0L, null);
+            for (int i = 0; i < shards; i++) {
+                nodeQueryRequest.shards.add(
+                    new SearchQueryThenFetchAsyncAction.ShardToQuery(
+                        1.0f,
+                        new String[] { "idx" },
+                        i,
+                        new ShardId("idx", "uuid", i),
+                        null,
+                        SplitShardCountSummary.UNSET
+                    )
+                );
+            }
+
+            RecordingChannel channel = new RecordingChannel(TransportVersion.current());
+            @SuppressWarnings("unchecked")
+            RequestHandlerRegistry<SearchQueryThenFetchAsyncAction.NodeQueryRequest> handler = (RequestHandlerRegistry<
+                SearchQueryThenFetchAsyncAction.NodeQueryRequest>) transport.getRequestHandler(
+                    SearchQueryThenFetchAsyncAction.NODE_SEARCH_ACTION_NAME
+                );
+            handler.processMessageReceived(nodeQueryRequest, channel);
+
+            boolean completed = channel.responded.await(10, TimeUnit.SECONDS);
+            resultsToRelease.forEach(QuerySearchResult::decRef);
+            assertTrue("channel was not responded to within 10 seconds", completed);
+            assertNull(channel.failure);
+            BytesTransportResponse response = (BytesTransportResponse) channel.response;
+            try {
+                StreamInput in = response.bytes().streamInput();
+                in.setTransportVersion(TransportVersion.current());
+                SearchQueryThenFetchAsyncAction.NodeQueryResponse nodeResponse = new SearchQueryThenFetchAsyncAction.NodeQueryResponse(in);
+                try {
+                    Object[] results = nodeResponse.getResults();
+                    assertThat(results.length, equalTo(shards));
+                    for (Object result : results) {
+                        assertThat(result, instanceOf(IllegalArgumentException.class));
+                    }
+                } finally {
+                    nodeResponse.decRef();
+                }
+            } finally {
+                assertTrue(response.decRef());
+            }
+            return List.copyOf(freed);
         } finally {
             IOUtils.closeWhileHandlingException(searchService, clusterService, transport, threadPool);
         }
