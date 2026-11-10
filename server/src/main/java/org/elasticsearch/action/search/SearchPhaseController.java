@@ -605,7 +605,8 @@ public final class SearchPhaseController {
         // <code>true</code> iff the query phase had no results. Otherwise <code>false</code>
         boolean isEmptyResult,
         Long timeRangeFilterFromMillis,
-        // SearchHits from top_hits aggs for release by SearchResponse (may be null)
+        // SearchHits from top_hits aggs (may be null). The list belongs to the QueryPhaseResultConsumer that created it, which
+        // releases its contents on close unless buildResponse has already drained them into a response.
         @Nullable List<SearchHits> topHitsToRelease
     ) {
 
@@ -616,7 +617,9 @@ public final class SearchPhaseController {
         }
 
         /**
-         * Creates a new search response from the given merged hits.
+         * Creates a new search response from the given merged hits. The response takes over the hits in
+         * {@link #topHitsToRelease} that the owning consumer has not released yet, so each of them is released exactly once:
+         * by the response when it is closed, or by the consumer if it closes before the response is built.
          * @see #merge(boolean, ReducedQueryPhase, AtomicArray)
          */
         public SearchResponseSections buildResponse(
@@ -633,7 +636,7 @@ public final class SearchPhaseController {
                 buildSearchProfileResults(fetchResults),
                 numReducePhases,
                 timeRangeFilterFromMillis,
-                topHitsToRelease,
+                drainTopHitsToRelease(topHitsToRelease),
                 completionOptionHitsToRelease
             );
         }
@@ -646,6 +649,25 @@ public final class SearchPhaseController {
             }
 
             return profileBuilder.build(fetchResults);
+        }
+    }
+
+    /**
+     * Empties the given top_hits release list and returns what it held, so that whoever calls this first takes the
+     * responsibility for releasing those hits. A search can build its response and close its result consumer on different
+     * threads, and both drain the same list, so the list itself is the lock.
+     *
+     * @return the hits removed from the list, or {@code null} if the list is {@code null}
+     */
+    @Nullable
+    static List<SearchHits> drainTopHitsToRelease(@Nullable List<SearchHits> topHitsToRelease) {
+        if (topHitsToRelease == null) {
+            return null;
+        }
+        synchronized (topHitsToRelease) {
+            List<SearchHits> drained = new ArrayList<>(topHitsToRelease);
+            topHitsToRelease.clear();
+            return drained;
         }
     }
 

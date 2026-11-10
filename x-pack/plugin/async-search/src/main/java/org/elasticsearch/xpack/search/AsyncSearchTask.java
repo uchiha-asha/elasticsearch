@@ -672,7 +672,7 @@ final class AsyncSearchTask extends SearchTask implements AsyncTask, Releasable 
             if (delegate != null) {
                 delegate.onFinalReduce(shards, totalHits, aggregations, reducePhase);
             }
-            searchResponse.updatePartialResponse(shards.size(), totalHits, () -> aggregations, reducePhase);
+            searchResponse.updateFinalReduce(shards.size(), totalHits, aggregations, reducePhase);
         }
 
         /**

@@ -76,9 +76,8 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
     private final boolean hasTopDocs;
     private final boolean hasAggs;
     private final boolean performFinalReduce;
+    // Owned by this consumer until ReducedQueryPhase#buildResponse drains it into a response; doClose() releases what is left
     private final List<SearchHits> topHitsToRelease;
-    // Set when the list is passed to ReducedQueryPhase so doClose() does not release it
-    private volatile boolean topHitsOwnershipTransferred;
 
     private final Consumer<Exception> onPartialMergeFailure;
 
@@ -152,11 +151,11 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
     protected synchronized void doClose() {
         assert assertFailureAndBreakerConsistent();
         releaseBuffer();
-        if (topHitsToRelease != null && topHitsOwnershipTransferred == false) {
-            for (SearchHits h : topHitsToRelease) {
+        List<SearchHits> undrainedTopHits = SearchPhaseController.drainTopHitsToRelease(topHitsToRelease);
+        if (undrainedTopHits != null) {
+            for (SearchHits h : undrainedTopHits) {
                 h.decRef();
             }
-            topHitsToRelease.clear();
         }
         circuitBreaker.addWithoutBreaking(-circuitBreakerBytes);
         circuitBreakerBytes = 0;
@@ -300,7 +299,6 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
                 queryPhaseRankCoordinatorContext,
                 topHitsToRelease
             );
-            topHitsOwnershipTransferred = true;
             buffer = null;
         } finally {
             if (buffer != null) {

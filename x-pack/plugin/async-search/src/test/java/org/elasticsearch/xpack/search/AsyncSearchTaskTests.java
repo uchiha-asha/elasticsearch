@@ -6,6 +6,8 @@
  */
 package org.elasticsearch.xpack.search;
 
+import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TotalHits;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.TransportVersion;
@@ -20,6 +22,7 @@ import org.elasticsearch.action.support.ActionTestUtils;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
+import org.elasticsearch.common.lucene.search.TopDocsAndMaxScore;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.index.shard.ShardId;
@@ -31,6 +34,7 @@ import org.elasticsearch.search.SearchShardTarget;
 import org.elasticsearch.search.aggregations.BucketOrder;
 import org.elasticsearch.search.aggregations.InternalAggregations;
 import org.elasticsearch.search.aggregations.bucket.terms.StringTerms;
+import org.elasticsearch.search.aggregations.metrics.InternalTopHits;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.tasks.RawTaskStatus;
 import org.elasticsearch.tasks.Task;
@@ -64,6 +68,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasEntry;
 import static org.hamcrest.Matchers.hasToString;
 import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -475,6 +480,57 @@ public class AsyncSearchTaskTests extends ESTestCase {
             ((AsyncSearchTask.Listener) task.getProgressListener()).onFailure(new IOException("boum"));
             assertCompletionListeners(task, totalShards, totalShards, numSkippedShards, 0, true, true, false);
         }
+    }
+
+    /**
+     * The search releases its references to the {@code top_hits} hits of the final reduce when it fails, while the task keeps
+     * the final reduce aggregations for its partial response, so the task holds its own reference to those hits until it is
+     * closed.
+     */
+    public void testFatalFailureDuringFetchWithTopHits() throws InterruptedException {
+        SearchHits topHitsSearchHits = new SearchHits(
+            new SearchHit[] { new SearchHit(0, "id") },
+            new TotalHits(1, TotalHits.Relation.EQUAL_TO),
+            1.0f
+        );
+        assertTrue(topHitsSearchHits.isPooled());
+        InternalAggregations aggs = InternalAggregations.from(
+            Collections.singletonList(
+                new InternalTopHits(
+                    "top",
+                    0,
+                    1,
+                    new TopDocsAndMaxScore(
+                        new TopDocs(new TotalHits(1, TotalHits.Relation.EQUAL_TO), new ScoreDoc[] { new ScoreDoc(0, 1.0f) }),
+                        1.0f
+                    ),
+                    topHitsSearchHits,
+                    null
+                )
+            )
+        );
+        try (AsyncSearchTask task = createAsyncSearchTask()) {
+            List<SearchShard> shards = List.of(new SearchShard(null, new ShardId("0", "0", 1)));
+            task.getSearchProgressActionListener()
+                .onListShards(shards, Map.of(), SearchResponse.Clusters.EMPTY, false, createTimeProvider());
+            task.getSearchProgressActionListener().onFinalReduce(shards, new TotalHits(1, TotalHits.Relation.EQUAL_TO), aggs, 0);
+            // the search releases the hits of its final reduce when it fails
+            topHitsSearchHits.decRef();
+            assertTrue(topHitsSearchHits.hasReferences());
+            ((AsyncSearchTask.Listener) task.getProgressListener()).onFailure(new IOException("boum"));
+
+            CountDownLatch latch = new CountDownLatch(1);
+            task.addCompletionListener(ActionTestUtils.assertNoFailureListener(resp -> {
+                assertNotNull(resp.getFailure());
+                assertThat(resp.getFailure().getMessage(), not(containsString("error while reducing partial results")));
+                InternalTopHits topHits = resp.getSearchResponse().getAggregations().get("top");
+                assertThat(topHits.getHits().getHits().length, equalTo(1));
+                latch.countDown();
+            }), TimeValue.timeValueMillis(1), true);
+            assertTrue(latch.await(10, TimeUnit.SECONDS));
+            assertTrue(topHitsSearchHits.hasReferences());
+        }
+        assertFalse(topHitsSearchHits.hasReferences());
     }
 
     public void testFatalFailureWithNoCause() throws InterruptedException {

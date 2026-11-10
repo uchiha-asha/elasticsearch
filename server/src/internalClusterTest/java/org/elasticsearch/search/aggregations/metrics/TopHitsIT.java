@@ -85,6 +85,7 @@ import static org.elasticsearch.xcontent.XContentFactory.yamlBuilder;
 import static org.hamcrest.Matchers.arrayContaining;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
@@ -706,6 +707,36 @@ public class TopHitsIT extends ESIntegTestCase {
         } catch (SearchPhaseExecutionException e) {
             assertThat(e.toString(), containsString("No mapping found for [xyz] in order to sort on"));
         }
+    }
+
+    /**
+     * The {@code fvh} highlighter needs term vectors, which the {@code text} field does not have, so the fetch phase of the
+     * top-level search fails after the {@code top_hits} aggregation has been reduced. The search fails, and the per-test leak
+     * check verifies that the pooled hits from the reduced {@code top_hits} are released.
+     */
+    public void testFetchPhaseFailureReleasesTopHits() {
+        SearchPhaseExecutionException e = expectThrows(
+            SearchPhaseExecutionException.class,
+            prepareSearch("idx").setQuery(matchQuery("text", "text"))
+                .setAllowPartialSearchResults(false)
+                .highlighter(new HighlightBuilder().field("text").highlighterType("fvh"))
+                .addAggregation(terms("terms").executionHint(randomExecutionHint()).field(TERMS_AGGS_FIELD).subAggregation(topHits("hits")))
+        );
+        assertThat(e.toString(), containsString("should be indexed with term vector with position offsets"));
+
+        assertNoFailuresAndResponse(
+            prepareSearch("idx").setQuery(matchQuery("text", "text"))
+                .setAllowPartialSearchResults(false)
+                .highlighter(new HighlightBuilder().field("text"))
+                .addAggregation(
+                    terms("terms").executionHint(randomExecutionHint()).field(TERMS_AGGS_FIELD).subAggregation(topHits("hits"))
+                ),
+            response -> {
+                assertThat(response.getHits().getHits().length, greaterThan(0));
+                Terms terms = response.getAggregations().get("terms");
+                assertThat(terms.getBuckets(), not(empty()));
+            }
+        );
     }
 
     public void testEmptyIndex() throws Exception {

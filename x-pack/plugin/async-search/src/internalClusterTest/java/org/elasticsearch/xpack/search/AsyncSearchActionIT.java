@@ -21,9 +21,11 @@ import org.elasticsearch.search.SearchService;
 import org.elasticsearch.search.aggregations.AggregationBuilders;
 import org.elasticsearch.search.aggregations.bucket.terms.InternalTerms;
 import org.elasticsearch.search.aggregations.bucket.terms.StringTerms;
+import org.elasticsearch.search.aggregations.metrics.InternalTopHits;
 import org.elasticsearch.search.aggregations.metrics.Max;
 import org.elasticsearch.search.aggregations.metrics.Min;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.search.fetch.subphase.highlight.HighlightBuilder;
 import org.elasticsearch.search.query.ThrowingQueryBuilder;
 import org.elasticsearch.tasks.TaskInfo;
 import org.elasticsearch.test.ESIntegTestCase.SuiteScopeTestCase;
@@ -53,6 +55,7 @@ import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.not;
 
 @TestLogging(
     reason = "testing debug log output to identify race condition",
@@ -680,6 +683,50 @@ public class AsyncSearchActionIT extends AsyncSearchIntegTestCase {
             ensureTaskCompletion(response.getId());
         } finally {
             response.decRef();
+        }
+    }
+
+    /**
+     * The {@code fvh} highlighter needs term vectors, which the {@code terms} field does not have, so the fetch phase fails
+     * after the {@code top_hits} aggregation has been reduced. Both the response to the submit request and the stored
+     * response report the failure, and the per-test leak check verifies that the pooled {@code top_hits} hits are released.
+     */
+    public void testFetchPhaseFailureWithTopHits() throws Exception {
+        SubmitAsyncSearchRequest request = new SubmitAsyncSearchRequest(indexName);
+        request.setKeepOnCompletion(true);
+        request.setWaitForCompletionTimeout(TimeValue.timeValueMinutes(10));
+        request.getSearchRequest().allowPartialSearchResults(false);
+        request.getSearchRequest()
+            .source(
+                new SearchSourceBuilder().query(new MatchAllQueryBuilder())
+                    .highlighter(new HighlightBuilder().field("terms").highlighterType("fvh"))
+                    .aggregation(AggregationBuilders.topHits("top").size(1))
+            );
+
+        AsyncSearchResponse response = submitAsyncSearch(request);
+        try {
+            assertFalse(response.isRunning());
+            assertTrue(response.isPartial());
+            assertNotNull(response.getFailure());
+            assertThat(
+                ExceptionsHelper.stackTrace(response.getFailure()),
+                containsString("should be indexed with term vector with position offsets")
+            );
+            assertThat(response.getFailure().getMessage(), not(containsString("error while reducing partial results")));
+            InternalTopHits topHits = response.getSearchResponse().getAggregations().get("top");
+            assertThat(topHits.getHits().getHits().length, equalTo(1));
+            ensureTaskNotRunning(response.getId());
+            ensureTaskCompletion(response.getId());
+        } finally {
+            response.decRef();
+        }
+
+        AsyncSearchResponse stored = getAsyncSearch(response.getId());
+        try {
+            assertFalse(stored.isRunning());
+            assertNotNull(stored.getFailure());
+        } finally {
+            stored.decRef();
         }
     }
 

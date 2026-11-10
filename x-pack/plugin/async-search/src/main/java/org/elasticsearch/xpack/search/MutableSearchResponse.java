@@ -59,6 +59,11 @@ class MutableSearchResponse extends AbstractRefCounted {
      * this as we receive updates on the search progress listener.
      */
     private Supplier<InternalAggregations> reducedAggsSource = () -> null;
+    /**
+     * The {@code top_hits} hits in the aggregations of {@link #reducedAggsSource} that this response holds a reference to,
+     * so that the aggregations stay readable after the search releases its own references.
+     */
+    private List<SearchHits> reducedAggsTopHits = List.of();
     private int reducePhase;
     /**
      * The response produced by the search API. Once we receive it we stop
@@ -139,6 +144,29 @@ class MutableSearchResponse extends AbstractRefCounted {
         this.totalHits = totalHits;
         this.reducedAggsSource = reducedAggs;
         this.reducePhase = reducePhase;
+        releaseReducedAggsTopHits();
+    }
+
+    /**
+     * Updates the response with the result of the final reduction of the local shards. The search releases the
+     * {@code top_hits} hits of these aggregations when it completes, even if it fails, while this response keeps the
+     * aggregations to build partial responses, so this takes its own reference to those hits until it is released.
+     */
+    @SuppressWarnings("HiddenField")
+    synchronized void updateFinalReduce(int successfulShards, TotalHits totalHits, InternalAggregations aggregations, int reducePhase) {
+        updatePartialResponse(successfulShards, totalHits, () -> aggregations, reducePhase);
+        if (hasReferences()) {
+            List<SearchHits> topHits = new ArrayList<>();
+            InternalAggregations.addTopHitsToReleaseList(aggregations, topHits, true);
+            reducedAggsTopHits = topHits;
+        }
+    }
+
+    private void releaseReducedAggsTopHits() {
+        for (SearchHits hits : reducedAggsTopHits) {
+            hits.decRef();
+        }
+        reducedAggsTopHits = List.of();
     }
 
     /**
@@ -529,5 +557,6 @@ class MutableSearchResponse extends AbstractRefCounted {
             clusterResponses.clear();
             clusterResponses = null;
         }
+        releaseReducedAggsTopHits();
     }
 }
