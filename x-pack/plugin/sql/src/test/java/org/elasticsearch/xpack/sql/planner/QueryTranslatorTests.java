@@ -80,6 +80,7 @@ import org.elasticsearch.xpack.sql.querydsl.agg.AggFilter;
 import org.elasticsearch.xpack.sql.querydsl.agg.GroupByDateHistogram;
 import org.elasticsearch.xpack.sql.querydsl.container.AggregateSort;
 import org.elasticsearch.xpack.sql.querydsl.container.MetricAggRef;
+import org.elasticsearch.xpack.sql.querydsl.container.QueryContainer;
 import org.elasticsearch.xpack.sql.session.SingletonExecutable;
 import org.elasticsearch.xpack.sql.types.SqlTypesTests;
 import org.elasticsearch.xpack.sql.util.DateUtils;
@@ -1421,6 +1422,47 @@ public class QueryTranslatorTests extends ESTestCase {
             eqe.queryContainer().toString().replaceAll("\\s+", ""),
             containsString(Strings.format("\"buckets_path\":{\"a0\":\"%s._count\"}", countAgg.getName()))
         );
+    }
+
+    // Ordering a grouped query directly by a literal aggregate, or by its alias, sorts on the IIF(COUNT(1) = 0, ...)
+    // expression ReplaceAggregatesWithLiterals substitutes for it, next to an aggregate sort on COUNT(*).
+    public void testOrderByLiteralAggregateInGroupedQueryPlans() {
+        for (String orderBy : List.of("m", "MAX(1)", "m, c", "MAX(1), c")) {
+            assertSortsHaveBackingColumns("SELECT keyword, MAX(1) AS m, COUNT(*) AS c FROM test GROUP BY keyword ORDER BY " + orderBy);
+        }
+    }
+
+    // An identity aggregate over the alias of a literal aggregate, e.g. MIN(m) with m = MAX(1), plans to the same sort
+    // as ordering by the alias itself, alone or next to an aggregate sort on COUNT(*).
+    public void testOrderByAggregateOverLiteralAggregateAliasPlans() {
+        for (String select : List.of("MAX(1) AS m", "SUM(1) AS m", "COUNT(DISTINCT 1) AS m", "AVG(1) AS m")) {
+            for (String orderBy : List.of("MIN(m)", "SUM(m)", "MAX(m)", "AVG(m)", "MIN(m), c", "AVG(m) DESC, c")) {
+                assertSortsHaveBackingColumns(
+                    "SELECT keyword, " + select + ", COUNT(*) AS c FROM test GROUP BY keyword ORDER BY " + orderBy
+                );
+            }
+        }
+    }
+
+    // HAVING over the alias of a literal aggregate is evaluated as a bucket_selector script over the COUNT(1) that
+    // the literal aggregate is rewritten to.
+    public void testHavingAggregateOverLiteralAggregateAliasPlans() {
+        for (String having : List.of("SUM(s) > 10", "AVG(s) > 10", "MIN(s) / 2 > 1")) {
+            PhysicalPlan p = optimizeAndPlan("SELECT keyword, SUM(1) AS s FROM test GROUP BY keyword HAVING " + having);
+            assertEquals(EsQueryExec.class, p.getClass());
+            assertThat(((EsQueryExec) p).queryContainer().toString(), containsString("bucket_selector"));
+        }
+    }
+
+    private void assertSortsHaveBackingColumns(String sql) {
+        PhysicalPlan p = optimizeAndPlan(sql);
+        assertEquals(sql, EsQueryExec.class, p.getClass());
+        QueryContainer queryContainer = ((EsQueryExec) p).queryContainer();
+        List<?> sortingColumns = queryContainer.sortingColumns();
+        if (queryContainer.sort().values().stream().anyMatch(AggregateSort.class::isInstance)) {
+            // every sort, including the script sort on the literal aggregate, maps to an output column
+            assertEquals(sql, queryContainer.sort().size(), sortingColumns.size());
+        }
     }
 
     @SuppressWarnings({ "rawtypes" })

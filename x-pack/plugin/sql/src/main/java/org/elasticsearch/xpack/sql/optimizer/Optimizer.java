@@ -121,15 +121,16 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
 
     @Override
     protected Iterable<RuleExecutor.Batch<LogicalPlan>> batches() {
-        var substitutions = new Batch<>(
-            "Substitutions",
+        var substitutions = new Batch<>("Substitutions", Limiter.ONCE, new RewritePivot(), new ReplaceRegexMatch());
+
+        var refs = new Batch<>(
+            "Replace References",
             Limiter.ONCE,
-            new RewritePivot(),
-            new ReplaceRegexMatch(),
+            new ReplaceReferenceAttributeWithSource(),
+            // the next two rules must run in this order and after ReplaceReferenceAttributeWithSource (see classes)
+            new CollapseAggregateOverLiteralAggregate(),
             new ReplaceAggregatesWithLiterals()
         );
-
-        var refs = new Batch<>("Replace References", Limiter.ONCE, new ReplaceReferenceAttributeWithSource());
 
         var operators = new Batch<>(
             "Operator Optimization",
@@ -776,33 +777,76 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
      * Any numeric aggregates (avg, min, max, sum) acting on literals are converted to an iif(count(1)=0, null, literal*count(1)) for sum,
      * and to iif(count(1)=0,null,literal) for the other three.
      * Additionally count(DISTINCT literal) is converted to iif(count(1)=0, 0, 1).
+     * <p>
+     * Runs after {@link ReplaceReferenceAttributeWithSource} has inlined the aggregate aliases, so that every copy of a
+     * literal aggregate - the one in the {@code Aggregate} and those inlined into an {@code OrderBy} or {@code Filter} -
+     * is rewritten to the same expression and keeps matching the column the {@code Aggregate} produces. An aggregate
+     * wrapping such a copy is dropped beforehand by {@link CollapseAggregateOverLiteralAggregate}.
      */
     private static class ReplaceAggregatesWithLiterals extends OptimizerBasicRule {
+
+        /**
+         * Whether this rule rewrites the given aggregate to a scalar expression.
+         */
+        static boolean isLiteralAggregate(AggregateFunction a) {
+            return (Stats.isTypeCompatible(a) || (a instanceof Count c && c.distinct())) && a.field().foldable();
+        }
 
         @Override
         public LogicalPlan apply(LogicalPlan p) {
             return p.transformExpressionsDown(AggregateFunction.class, a -> {
-                if (Stats.isTypeCompatible(a) || (a instanceof Count && ((Count) a).distinct())) {
+                if (isLiteralAggregate(a)) {
+                    Expression countOne = new Count(a.source(), new Literal(Source.EMPTY, 1, a.dataType()), false);
+                    Equals countEqZero = new Equals(a.source(), countOne, new Literal(Source.EMPTY, 0, a.dataType()));
+                    Expression argument = a.field();
+                    Literal foldedArgument = new Literal(argument.source(), argument.fold(), a.dataType());
 
-                    if (a.field().foldable()) {
-                        Expression countOne = new Count(a.source(), new Literal(Source.EMPTY, 1, a.dataType()), false);
-                        Equals countEqZero = new Equals(a.source(), countOne, new Literal(Source.EMPTY, 0, a.dataType()));
-                        Expression argument = a.field();
-                        Literal foldedArgument = new Literal(argument.source(), argument.fold(), a.dataType());
-
-                        Expression iifResult = Literal.NULL;
-                        Expression iifElseResult = foldedArgument;
-                        if (a instanceof Sum) {
-                            iifElseResult = new Mul(a.source(), countOne, foldedArgument);
-                        } else if (a instanceof Count) {
-                            iifResult = new Literal(Source.EMPTY, 0, a.dataType());
-                            iifElseResult = new Literal(Source.EMPTY, 1, a.dataType());
-                        }
-
-                        return new Iif(a.source(), countEqZero, iifResult, iifElseResult);
+                    Expression iifResult = Literal.NULL;
+                    Expression iifElseResult = foldedArgument;
+                    if (a instanceof Sum) {
+                        iifElseResult = new Mul(a.source(), countOne, foldedArgument);
+                    } else if (a instanceof Count) {
+                        iifResult = new Literal(Source.EMPTY, 0, a.dataType());
+                        iifElseResult = new Literal(Source.EMPTY, 1, a.dataType());
                     }
+
+                    return new Iif(a.source(), countEqZero, iifResult, iifElseResult);
                 }
                 return a;
+            });
+        }
+    }
+
+    /**
+     * The literal-aggregate counterpart of {@link CollapseAggregateOverAggregate}: drops a {@link SingleValueIdentityAgg}
+     * wrapping an aggregate that {@link ReplaceAggregatesWithLiterals} rewrites, e.g. the {@code MIN(MAX(1))} that
+     * {@code SELECT MAX(1) AS m ... GROUP BY k ORDER BY MIN(m)} turns into once the alias is inlined.
+     * <p>
+     * It has to run before {@link ReplaceAggregatesWithLiterals}: that rule turns the inner aggregate into a scalar
+     * {@code IIF(COUNT(1) = 0, ...)}, which {@link CollapseAggregateOverAggregate} does not collapse, leaving an outer
+     * aggregate that has no backing column in the {@code Aggregate}. Collapsing first lets the inner aggregate be
+     * rewritten exactly like its copy in the {@code Aggregate}.
+     * <p>
+     * Where the outer aggregate's type differs from the inner one's (AVG over MAX(1) is DOUBLE, MAX(1) is INTEGER),
+     * the result is cast to the outer type, so any arithmetic or comparison over it, e.g. in HAVING, keeps the type
+     * the query declares. The cast is over the scalar the inner aggregate becomes, so it loses no aggregation. An
+     * {@code OrderBy} gets no cast: widening a number does not change its order, and without the cast the sort is on
+     * the very expression the {@code Aggregate} outputs, which is what lets it find its backing column.
+     */
+    static class CollapseAggregateOverLiteralAggregate extends OptimizerBasicRule {
+
+        @Override
+        public LogicalPlan apply(LogicalPlan plan) {
+            return plan.transformUp(p -> {
+                boolean castToOuterType = p instanceof OrderBy == false;
+                return p.transformExpressionsOnlyUp(AggregateFunction.class, f -> {
+                    if (f instanceof SingleValueIdentityAgg
+                        && f.field() instanceof AggregateFunction inner
+                        && ReplaceAggregatesWithLiterals.isLiteralAggregate(inner)) {
+                        return castToOuterType && f.dataType() != inner.dataType() ? new Cast(f.source(), inner, f.dataType()) : inner;
+                    }
+                    return f;
+                });
             });
         }
     }
@@ -857,7 +901,8 @@ public class Optimizer extends RuleExecutor<LogicalPlan> {
     // otherwise promote that inner aggregate (ReplaceAggsWithStats, ReplaceSumWithStats, ReplaceAggsWithPercentiles,
     // ...) handle it exactly as if it had been written on its own - no need to teach each of them about this
     // nesting shape. Anything else, including an aggregate reached through a scalar function, is rejected upfront by
-    // Verifier.checkNestedAggregateFunctions.
+    // Verifier.checkNestedAggregateFunctions. An inner aggregate over a literal, e.g. MAX(1), has already been collapsed
+    // by CollapseAggregateOverLiteralAggregate in the "Replace References" batch.
     //
     // Note the collapse keeps the value but not necessarily the declared type: AVG and PERCENTILE are always DOUBLE
     // whereas MIN/MAX take their field's type, so AVG(MIN(<integer>)) collapses to an INTEGER expression. That is

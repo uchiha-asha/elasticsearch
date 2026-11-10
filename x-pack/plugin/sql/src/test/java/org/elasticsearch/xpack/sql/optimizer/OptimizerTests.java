@@ -1283,6 +1283,85 @@ public class OptimizerTests extends ESTestCase {
         assertEquals(percentileRank, ((Alias) aggregates.get(1)).child());
     }
 
+    //
+    // CollapseAggregateOverLiteralAggregate: a SingleValueIdentityAgg wrapping an aggregate that
+    // ReplaceAggregatesWithLiterals rewrites reduces to that aggregate, cast to the outer aggregate's type.
+    //
+    public void testCollapseOverLiteralAggregateCollapsesToInner() {
+        Max maxOfOne = new Max(EMPTY, ONE);
+        Sum sumOfOne = new Sum(EMPTY, ONE);
+        Count countDistinctOne = new Count(EMPTY, ONE, true);
+
+        LogicalPlan result = new Optimizer.CollapseAggregateOverLiteralAggregate().apply(
+            new Aggregate(
+                EMPTY,
+                FROM(),
+                emptyList(),
+                asList(
+                    new Alias(EMPTY, "min_of_max", new Min(EMPTY, maxOfOne)),
+                    new Alias(EMPTY, "sum_of_sum", new Sum(EMPTY, sumOfOne)),
+                    new Alias(EMPTY, "max_of_count_distinct", new Max(EMPTY, countDistinctOne))
+                )
+            )
+        );
+
+        List<? extends NamedExpression> aggregates = ((Aggregate) result).aggregates();
+        assertEquals(maxOfOne, ((Alias) aggregates.get(0)).child());
+        assertEquals(sumOfOne, ((Alias) aggregates.get(1)).child());
+        assertEquals(countDistinctOne, ((Alias) aggregates.get(2)).child());
+    }
+
+    // AVG is always DOUBLE while MAX(1) is INTEGER, so the collapsed inner aggregate is cast to DOUBLE.
+    public void testCollapseOverLiteralAggregateCastsToOuterType() {
+        Max maxOfOne = new Max(EMPTY, ONE);
+        Avg outerAvg = new Avg(EMPTY, maxOfOne);
+
+        LogicalPlan result = new Optimizer.CollapseAggregateOverLiteralAggregate().apply(
+            new Aggregate(EMPTY, FROM(), emptyList(), singletonList(new Alias(EMPTY, "avg_of_max", outerAvg)))
+        );
+
+        Expression child = ((Alias) ((Aggregate) result).aggregates().get(0)).child();
+        assertThat(child, instanceOf(Cast.class));
+        assertEquals(DataTypes.DOUBLE, child.dataType());
+        assertEquals(maxOfOne, ((Cast) child).field());
+    }
+
+    // Ordering by a widened number is ordering by the number itself, so an ORDER BY gets no cast and sorts on the
+    // expression the Aggregate outputs.
+    public void testCollapseOverLiteralAggregateInOrderByDoesNotCast() {
+        Max maxOfOne = new Max(EMPTY, ONE);
+        Aggregate aggregate = new Aggregate(EMPTY, FROM(), emptyList(), singletonList(new Alias(EMPTY, "m", maxOfOne)));
+        OrderBy orderBy = new OrderBy(
+            EMPTY,
+            aggregate,
+            singletonList(new Order(EMPTY, new Avg(EMPTY, maxOfOne), OrderDirection.ASC, Order.NullsPosition.LAST))
+        );
+
+        LogicalPlan result = new Optimizer.CollapseAggregateOverLiteralAggregate().apply(orderBy);
+
+        assertEquals(maxOfOne, ((OrderBy) result).order().get(0).child());
+    }
+
+    // Inner aggregates over a field, and over a literal that ReplaceAggregatesWithLiterals keeps (a non-distinct
+    // COUNT), are left to CollapseAggregateOverAggregate.
+    public void testCollapseOverLiteralAggregateLeavesOtherInnerAggregates() {
+        Min minOfMaxField = new Min(EMPTY, new Max(EMPTY, getFieldAttribute()));
+        Avg avgOfCountOne = new Avg(EMPTY, new Count(EMPTY, ONE, false));
+
+        LogicalPlan result = new Optimizer.CollapseAggregateOverLiteralAggregate().apply(
+            new Aggregate(
+                EMPTY,
+                FROM(),
+                emptyList(),
+                asList(new Alias(EMPTY, "min_of_max_field", minOfMaxField), new Alias(EMPTY, "avg_of_count", avgOfCountOne))
+            )
+        );
+
+        List<? extends NamedExpression> aggregates = ((Aggregate) result).aggregates();
+        assertEquals(minOfMaxField, ((Alias) aggregates.get(0)).child());
+        assertEquals(avgOfCountOne, ((Alias) aggregates.get(1)).child());
+    }
+
     // Defensive counterpart to testSumOverAggregateExpressionIsLeftUnchanged, for the PERCENTILE promotion path:
     // ReplaceAggsWithPercentiles keys its rewrite on the field collected in an earlier pass, so a field that still
     // holds an aggregate makes that key go stale once the inner aggregate is promoted first. The lookup then has to

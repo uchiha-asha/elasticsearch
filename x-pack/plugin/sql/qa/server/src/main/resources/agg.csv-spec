@@ -1251,6 +1251,35 @@ M              |25945
 F              |25976
 ;
 
+identityAggregateOverLiteralAggregateAliasInOrderBy
+schema::gender:s|m:i|c:l
+SELECT gender, MAX(1) AS m, COUNT(*) c FROM test_emp WHERE gender IS NOT NULL GROUP BY gender ORDER BY MIN(m), gender;
+
+    gender     |       m       |       c
+---------------+---------------+---------------
+F              |1              |33
+M              |1              |57
+;
+
+identityAggregateOverLiteralCountDistinctAliasInOrderBy
+schema::gender:s|d:l|c:l
+SELECT gender, COUNT(DISTINCT 1) AS d, COUNT(*) c FROM test_emp WHERE gender IS NOT NULL GROUP BY gender ORDER BY MAX(d), gender DESC;
+
+    gender     |       d       |       c
+---------------+---------------+---------------
+M              |1              |57
+F              |1              |33
+;
+
+identityAggregateOverLiteralSumAliasInHaving
+schema::gender:s|s:l
+SELECT gender, SUM(1) AS s FROM test_emp WHERE gender IS NOT NULL GROUP BY gender HAVING SUM(s) > 40 ORDER BY gender;
+
+    gender     |       s
+---------------+---------------
+M              |57
+;
+
 percentileAggregateFunctionsWithScalars
 schema::percentile:d|percentile_rank:d|gender:s
 SELECT PERCENTILE(CASE WHEN (salary / 2) > 10000 THEN (salary + 12345) * 1.2 ELSE (salary - 12345) * 2.7 END, 80) AS "percentile",

@@ -8,10 +8,14 @@ package org.elasticsearch.xpack.sql.optimizer;
 
 import org.elasticsearch.core.Tuple;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.xpack.ql.expression.Alias;
 import org.elasticsearch.xpack.ql.expression.Expression;
 import org.elasticsearch.xpack.ql.expression.FieldAttribute;
 import org.elasticsearch.xpack.ql.expression.Literal;
+import org.elasticsearch.xpack.ql.expression.NamedExpression;
+import org.elasticsearch.xpack.ql.expression.Order;
 import org.elasticsearch.xpack.ql.expression.UnresolvedAttribute;
+import org.elasticsearch.xpack.ql.expression.function.aggregate.AggregateFunction;
 import org.elasticsearch.xpack.ql.expression.predicate.operator.comparison.BinaryComparison;
 import org.elasticsearch.xpack.ql.expression.predicate.operator.comparison.Equals;
 import org.elasticsearch.xpack.ql.expression.predicate.operator.comparison.GreaterThan;
@@ -23,11 +27,16 @@ import org.elasticsearch.xpack.ql.expression.predicate.operator.comparison.NullE
 import org.elasticsearch.xpack.ql.index.EsIndex;
 import org.elasticsearch.xpack.ql.index.IndexResolution;
 import org.elasticsearch.xpack.ql.optimizer.OptimizerRules.LiteralsOnTheRight;
+import org.elasticsearch.xpack.ql.plan.logical.Aggregate;
 import org.elasticsearch.xpack.ql.plan.logical.Filter;
 import org.elasticsearch.xpack.ql.plan.logical.LogicalPlan;
+import org.elasticsearch.xpack.ql.plan.logical.OrderBy;
 import org.elasticsearch.xpack.ql.plan.logical.UnaryPlan;
+import org.elasticsearch.xpack.ql.type.DataTypes;
 import org.elasticsearch.xpack.ql.type.EsField;
 import org.elasticsearch.xpack.sql.analysis.analyzer.Analyzer;
+import org.elasticsearch.xpack.sql.expression.function.scalar.Cast;
+import org.elasticsearch.xpack.sql.expression.predicate.conditional.Iif;
 import org.elasticsearch.xpack.sql.parser.SqlParser;
 import org.elasticsearch.xpack.sql.types.SqlTypesTests;
 
@@ -44,6 +53,7 @@ import static org.elasticsearch.xpack.ql.expression.predicate.operator.compariso
 import static org.elasticsearch.xpack.ql.expression.predicate.operator.comparison.BinaryComparisonProcessor.BinaryComparisonOperation.NEQ;
 import static org.elasticsearch.xpack.ql.expression.predicate.operator.comparison.BinaryComparisonProcessor.BinaryComparisonOperation.NULLEQ;
 import static org.elasticsearch.xpack.sql.analysis.analyzer.AnalyzerTestUtils.analyzer;
+import static org.hamcrest.Matchers.instanceOf;
 
 public class OptimizerRunTests extends ESTestCase {
 
@@ -265,6 +275,63 @@ public class OptimizerRunTests extends ESTestCase {
 
     private LogicalPlan planWithArithmeticCondition(String condition) {
         return plan("SELECT some.string FROM test WHERE " + condition);
+    }
+
+    // An identity aggregate over the alias of a literal aggregate orders by the same IIF(COUNT(1) = 0, ...) expression
+    // the Aggregate computes for that alias, exactly like ordering by the alias itself.
+    public void testOrderByAggregateOverLiteralAggregateAliasOrdersByAggregateColumn() {
+        for (String query : List.of(
+            "SELECT keyword, MAX(1) AS m FROM test GROUP BY keyword ORDER BY m",
+            "SELECT keyword, MAX(1) AS m FROM test GROUP BY keyword ORDER BY MIN(m)",
+            "SELECT keyword, SUM(1) AS m FROM test GROUP BY keyword ORDER BY SUM(m)",
+            "SELECT keyword, COUNT(DISTINCT 1) AS m FROM test GROUP BY keyword ORDER BY MAX(m)",
+            "SELECT keyword, MAX(1) AS m FROM test GROUP BY keyword ORDER BY AVG(m)",
+            "SELECT keyword, MAX(1) AS m FROM test GROUP BY keyword ORDER BY SUM(m) DESC"
+        )) {
+            LogicalPlan p = plan(query);
+            Expression order = singleOrderExpression(p);
+            assertThat(query, order, instanceOf(Iif.class));
+            assertEquals(query, aliasedAggregate(p, "m"), order);
+            assertFalse(query, hasNestedAggregate(order));
+        }
+    }
+
+    // AVG is DOUBLE whereas MAX(1) is INTEGER, so HAVING compares the aggregate column cast to DOUBLE.
+    public void testHavingAvgOverLiteralAggregateAliasCastsAggregateColumn() {
+        LogicalPlan p = plan("SELECT keyword, MAX(1) AS m FROM test GROUP BY keyword HAVING AVG(m) / 2 > 0");
+        List<LogicalPlan> filters = p.collect(Filter.class::isInstance);
+        assertEquals(1, filters.size());
+        Expression condition = ((Filter) filters.get(0)).condition();
+        assertFalse(hasNestedAggregate(condition));
+        List<Expression> casts = condition.collect(Cast.class::isInstance);
+        assertEquals(1, casts.size());
+        assertEquals(DataTypes.DOUBLE, casts.get(0).dataType());
+        assertEquals(aliasedAggregate(p, "m"), ((Cast) casts.get(0)).field());
+    }
+
+    private static Expression singleOrderExpression(LogicalPlan plan) {
+        List<LogicalPlan> orderBys = plan.collect(OrderBy.class::isInstance);
+        assertEquals(1, orderBys.size());
+        List<Order> orders = ((OrderBy) orderBys.get(0)).order();
+        assertEquals(1, orders.size());
+        return orders.get(0).child();
+    }
+
+    private static Expression aliasedAggregate(LogicalPlan plan, String name) {
+        List<LogicalPlan> aggregates = plan.collect(Aggregate.class::isInstance);
+        assertEquals(1, aggregates.size());
+        for (NamedExpression ne : ((Aggregate) aggregates.get(0)).aggregates()) {
+            if (ne instanceof Alias alias && alias.name().equals(name)) {
+                return alias.child();
+            }
+        }
+        throw new AssertionError("no aggregate aliased [" + name + "] in " + plan);
+    }
+
+    private static boolean hasNestedAggregate(Expression e) {
+        return e.anyMatch(
+            x -> x instanceof AggregateFunction && x.children().stream().anyMatch(c -> c.anyMatch(AggregateFunction.class::isInstance))
+        );
     }
 
     private static void assertSemanticMatching(Expression fieldAttributeExp, Expression unresolvedAttributeExp) {
