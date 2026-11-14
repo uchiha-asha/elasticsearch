@@ -307,7 +307,17 @@ public abstract class LongKeyedBucketOrds implements Releasable {
             ords = new LongLongHash(2, bigArrays);
             boolean success = false;
             try {
-                chains = new OwnerChains(bigArrays);
+                chains = new OwnerChains(bigArrays) {
+                    @Override
+                    long size() {
+                        return ords.size();
+                    }
+
+                    @Override
+                    long owningBucketOrd(long ord) {
+                        return ords.getKey1(ord);
+                    }
+                };
                 success = true;
             } finally {
                 if (success == false) {
@@ -319,12 +329,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
         @Override
         public long add(long owningBucketOrd, long value) {
             // This is in the critical path for collecting most aggs. Be careful of performance.
-            chains.ensureOwner(owningBucketOrd);
-            long ord = ords.add(owningBucketOrd, value);
-            if (ord >= 0) {
-                chains.append(owningBucketOrd, ord);
-            }
-            return ord;
+            return ords.add(owningBucketOrd, value);
         }
 
         @Override
@@ -387,16 +392,26 @@ public abstract class LongKeyedBucketOrds implements Releasable {
         public FromManySmall(BigArrays bigArrays, int owningBucketOrdShift) {
             ords = new LongHash(2, bigArrays);
             boolean success = false;
+            this.owningBucketOrdShift = owningBucketOrdShift;
+            this.owningBucketOrdMask = -1L << owningBucketOrdShift;
             try {
-                chains = new OwnerChains(bigArrays);
+                chains = new OwnerChains(bigArrays) {
+                    @Override
+                    long size() {
+                        return ords.size();
+                    }
+
+                    @Override
+                    long owningBucketOrd(long ord) {
+                        return ords.get(ord) >>> FromManySmall.this.owningBucketOrdShift;
+                    }
+                };
                 success = true;
             } finally {
                 if (success == false) {
                     ords.close();
                 }
             }
-            this.owningBucketOrdShift = owningBucketOrdShift;
-            this.owningBucketOrdMask = -1L << owningBucketOrdShift;
         }
 
         private long encode(long owningBucketOrd, long value) {
@@ -420,12 +435,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
                     )
                 );
             }
-            chains.ensureOwner(owningBucketOrd);
-            long ord = ords.add(enc);
-            if (ord >= 0) {
-                chains.append(owningBucketOrd, ord);
-            }
-            return ord;
+            return ords.add(enc);
         }
 
         @Override
@@ -466,9 +476,6 @@ public abstract class LongKeyedBucketOrds implements Releasable {
 
         @Override
         public BucketOrdsEnum ordsEnum(long owningBucketOrd) {
-            if (Long.numberOfLeadingZeros(owningBucketOrd) < owningBucketOrdShift) {
-                return BucketOrdsEnum.EMPTY;
-            }
             return new ChainedOrdsEnum(chains, owningBucketOrd) {
                 @Override
                 protected long valueOf(long ord) {
@@ -485,18 +492,21 @@ public abstract class LongKeyedBucketOrds implements Releasable {
     }
 
     /**
-     * Links the bucket ordinals of each owning bucket into a list, in the
-     * order they were added, so that counting and iterating the buckets of
-     * one owning bucket costs time proportional to that owning bucket's
-     * buckets rather than to all collected buckets. Building results visits
-     * every owning bucket, so a full scan per owning bucket would cost
-     * {@code owning buckets * total buckets}.
+     * Lists the bucket ordinals of each owning bucket in increasing order, so
+     * counting and iterating the buckets of one owning bucket costs time
+     * proportional to that owning bucket's buckets. Building results visits
+     * every owning bucket, so this keeps the build linear in the number of
+     * buckets.
      * <p>
-     * Uses one {@code long} per bucket ordinal plus three per owning bucket
-     * ordinal up to the highest one added. Ordinals are stored plus one so
-     * the zeroes of freshly allocated pages mean "none".
+     * Collection doesn't touch the lists: every read first links the bucket
+     * ordinals added since the previous read, so adding a bucket costs
+     * nothing extra and reads always see every added bucket.
+     * <p>
+     * Once read, uses one {@code long} per bucket ordinal plus three per
+     * owning bucket ordinal up to the highest one added. Ordinals are stored
+     * plus one so the zeroes of freshly allocated pages mean "none".
      */
-    static final class OwnerChains implements Releasable {
+    abstract static class OwnerChains implements Releasable {
         private final BigArrays bigArrays;
         /**
          * For each bucket ordinal, the next bucket ordinal of the same owning bucket, plus one.
@@ -514,6 +524,10 @@ public abstract class LongKeyedBucketOrds implements Releasable {
          * For each owning bucket ordinal, its number of buckets.
          */
         private LongArray counts;
+        /**
+         * The number of bucket ordinals already in the lists.
+         */
+        private long linked = 0;
         private long maxOwningBucketOrd = -1;
 
         OwnerChains(BigArrays bigArrays) {
@@ -533,36 +547,51 @@ public abstract class LongKeyedBucketOrds implements Releasable {
         }
 
         /**
-         * Make room for {@code owningBucketOrd}. Called before the bucket is
-         * added to the hash so that a failure to allocate leaves no bucket
-         * ordinal without a place in the lists.
+         * The number of bucket ordinals added so far.
          */
-        void ensureOwner(long owningBucketOrd) {
-            assert owningBucketOrd >= 0 : "owning bucket ordinals are never negative but got [" + owningBucketOrd + "]";
-            if (owningBucketOrd >= heads.size()) {
-                heads = bigArrays.grow(heads, owningBucketOrd + 1);
-                tails = bigArrays.grow(tails, owningBucketOrd + 1);
-                counts = bigArrays.grow(counts, owningBucketOrd + 1);
-            }
-        }
+        abstract long size();
 
         /**
-         * Append a newly added bucket ordinal to the end of its owning bucket's list.
+         * The owning bucket ordinal of the bucket ordinal {@code ord}.
          */
-        void append(long owningBucketOrd, long ord) {
-            next = bigArrays.grow(next, ord + 1);
-            long tail = tails.get(owningBucketOrd);
-            if (tail == 0) {
-                heads.set(owningBucketOrd, ord + 1);
-            } else {
-                next.set(tail - 1, ord + 1);
+        abstract long owningBucketOrd(long ord);
+
+        /**
+         * Link every bucket ordinal added since the last call. Each ordinal
+         * is counted in {@link #linked} only once it is fully linked, so a
+         * circuit breaker trip while growing the arrays leaves the lists
+         * consistent.
+         */
+        private void link() {
+            long size = size();
+            if (linked == size) {
+                return;
             }
-            tails.set(owningBucketOrd, ord + 1);
-            counts.increment(owningBucketOrd, 1);
-            maxOwningBucketOrd = Math.max(maxOwningBucketOrd, owningBucketOrd);
+            next = bigArrays.grow(next, size);
+            for (long ord = linked; ord < size; ord++) {
+                long owningBucketOrd = owningBucketOrd(ord);
+                assert owningBucketOrd >= 0 : "owning bucket ordinals are never negative but got [" + owningBucketOrd + "]";
+                if (owningBucketOrd >= counts.size()) {
+                    // counts grows last so a trip growing heads or tails grows them again on the next read
+                    heads = bigArrays.grow(heads, owningBucketOrd + 1);
+                    tails = bigArrays.grow(tails, owningBucketOrd + 1);
+                    counts = bigArrays.grow(counts, owningBucketOrd + 1);
+                }
+                long tail = tails.get(owningBucketOrd);
+                if (tail == 0) {
+                    heads.set(owningBucketOrd, ord + 1);
+                } else {
+                    next.set(tail - 1, ord + 1);
+                }
+                tails.set(owningBucketOrd, ord + 1);
+                counts.increment(owningBucketOrd, 1);
+                maxOwningBucketOrd = Math.max(maxOwningBucketOrd, owningBucketOrd);
+                linked = ord + 1;
+            }
         }
 
         long count(long owningBucketOrd) {
+            link();
             if (owningBucketOrd < 0 || owningBucketOrd > maxOwningBucketOrd) {
                 return 0;
             }
@@ -570,6 +599,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
         }
 
         long maxOwningBucketOrd() {
+            link();
             return maxOwningBucketOrd;
         }
 
@@ -577,6 +607,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
          * The first bucket ordinal of {@code owningBucketOrd}, or {@code -1} if it has none.
          */
         long first(long owningBucketOrd) {
+            link();
             if (owningBucketOrd < 0 || owningBucketOrd > maxOwningBucketOrd) {
                 return -1;
             }
@@ -587,6 +618,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
          * The bucket ordinal after {@code ord} in the same owning bucket, or {@code -1} if there is none.
          */
         long next(long ord) {
+            link();
             return next.get(ord) - 1;
         }
 
@@ -598,8 +630,8 @@ public abstract class LongKeyedBucketOrds implements Releasable {
 
     /**
      * Walks one owning bucket's list in {@link OwnerChains}. Reads each link
-     * when advancing, so buckets appended to the owning bucket while
-     * iterating are visited.
+     * when advancing, so buckets added to the owning bucket while iterating
+     * are visited.
      */
     private abstract static class ChainedOrdsEnum implements BucketOrdsEnum {
         private final OwnerChains chains;

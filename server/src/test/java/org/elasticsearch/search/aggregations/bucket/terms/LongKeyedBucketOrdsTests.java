@@ -267,22 +267,35 @@ public class LongKeyedBucketOrdsTests extends ESTestCase {
             assertThat(collectOrds(ords, owner), equalTo(List.of(0L, 2L)));
             assertThat(collectOrds(ords, 3), equalTo(List.of(1L)));
             assertThat(collectOrds(ords, 0), equalTo(List.of()));
+            assertThat(ords.bucketsInOrd(-1), equalTo(0L));
+            assertThat(collectOrds(ords, -1), equalTo(List.of()));
         }
     }
 
     /**
-     * A circuit breaker trip while the per owning bucket lists grow leaves
-     * nothing allocated once the ords are closed.
+     * Adds buckets and reads them back at random points until the circuit
+     * breaker trips, either while adding to the hash or while linking the
+     * per owning bucket lists on a read. Closing releases everything.
      */
     public void testReleasesOnCircuitBreakerTrip() {
-        MockBigArrays limited = new MockBigArrays(new MockPageCacheRecycler(Settings.EMPTY), ByteSizeValue.ofKb(between(32, 512)));
+        MockBigArrays limited = new MockBigArrays(new MockPageCacheRecycler(Settings.EMPTY), ByteSizeValue.ofKb(between(16, 512)));
         CircuitBreaker breaker = limited.breakerService().getBreaker(CircuitBreaker.REQUEST);
-        boolean small = randomBoolean();
-        LongKeyedBucketOrds ords = small ? new LongKeyedBucketOrds.FromManySmall(limited, 32) : new LongKeyedBucketOrds.FromMany(limited);
+        int maxOwningBucketOrd = between(1, 50_000);
+        LongKeyedBucketOrds ords = randomBoolean()
+            ? new LongKeyedBucketOrds.FromManySmall(limited, 32)
+            : new LongKeyedBucketOrds.FromMany(limited);
         try {
             expectThrows(CircuitBreakingException.class, () -> {
                 for (long i = 0; i < 10_000_000; i++) {
-                    ords.add(randomLongBetween(0, 100_000), i);
+                    ords.add(randomLongBetween(0, maxOwningBucketOrd), i);
+                    if (randomInt(99) == 0) {
+                        switch (between(0, 2)) {
+                            case 0 -> ords.bucketsInOrd(randomLongBetween(0, maxOwningBucketOrd));
+                            case 1 -> ords.ordsEnum(randomLongBetween(0, maxOwningBucketOrd)).next();
+                            case 2 -> ords.maxOwningBucketOrd();
+                            default -> throw new AssertionError("unexpected read");
+                        }
+                    }
                 }
             });
         } finally {

@@ -55,6 +55,10 @@ public class LongKeyedBucketOrdsBenchmark {
      * Number of distinct values to add to values within buckets.
      */
     private static final long DISTINCT_VALUES_IN_BUCKETS = 10;
+    /**
+     * The number of buckets added by each {@link ManyOwners} shape.
+     */
+    private static final int OWNED_BUCKETS = 100_000;
 
     private final PageCacheRecycler recycler = new PageCacheRecycler(Settings.EMPTY);
     private final BigArrays bigArrays = new BigArrays(recycler, null, "REQUEST");
@@ -281,13 +285,7 @@ public class LongKeyedBucketOrdsBenchmark {
     }
 
     /**
-     * The number of buckets added by each {@link ManyOwners} shape.
-     */
-    private static final int OWNED_BUCKETS = 100_000;
-
-    /**
-     * Collects {@link ManyOwners} without building results, to show the cost
-     * that tracking buckets per owning bucket adds to collection.
+     * Collects {@link ManyOwners} without building results.
      */
     @Benchmark
     @OperationsPerInvocation(1)
