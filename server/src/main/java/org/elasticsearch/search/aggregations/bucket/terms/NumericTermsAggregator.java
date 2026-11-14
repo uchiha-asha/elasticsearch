@@ -171,6 +171,7 @@ public final class NumericTermsAggregator extends TermsAggregator {
                 try (IntArray bucketsToCollect = bigArrays().newIntArray(owningBucketOrds.size())) {
                     long ordsToCollect = 0;
                     for (long ordIdx = 0; ordIdx < owningBucketOrds.size(); ordIdx++) {
+                        checkCancelledWhileBuilding();
                         final long owningBucketOrd = owningBucketOrds.get(ordIdx);
                         collectZeroDocEntriesIfNeeded(owningBucketOrd, excludeDeletedDocs);
                         int size = (int) Math.min(bucketOrds.bucketsInOrd(owningBucketOrd), bucketCountThresholds.getShardSize());
@@ -179,13 +180,16 @@ public final class NumericTermsAggregator extends TermsAggregator {
                     }
                     try (LongArray ordsArray = bigArrays().newLongArray(ordsToCollect)) {
                         long ordsCollected = 0;
+                        long bucketsVisited = 0;
                         for (long ordIdx = 0; ordIdx < topBucketsPerOrd.size(); ordIdx++) {
+                            checkCancelledWhileBuilding();
                             final long owningBucketOrd = owningBucketOrds.get(ordIdx);
                             try (ObjectArrayPriorityQueue<BucketAndOrd<B>> ordered = buildPriorityQueue(bucketsToCollect.get(ordIdx))) {
                                 BucketAndOrd<B> spare = null;
                                 BucketOrdsEnum ordsEnum = bucketOrds.ordsEnum(owningBucketOrd);
                                 BucketUpdater<B> bucketUpdater = bucketUpdater(owningBucketOrd);
                                 while (ordsEnum.next()) {
+                                    checkCancelledWhileBuilding(++bucketsVisited);
                                     long docCount = bucketDocCount(ordsEnum.ord());
                                     otherDocCounts.increment(ordIdx, docCount);
                                     if (docCount < bucketCountThresholds.getShardMinDocCount()) {

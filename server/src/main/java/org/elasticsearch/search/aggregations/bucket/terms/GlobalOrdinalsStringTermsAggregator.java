@@ -719,6 +719,7 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
                 try (IntArray bucketsToCollect = bigArrays().newIntArray(owningBucketOrds.size())) {
                     long ordsToCollect = 0;
                     for (long ordIdx = 0; ordIdx < owningBucketOrds.size(); ordIdx++) {
+                        checkCancelledWhileBuilding();
                         final long owningBucketOrd = owningBucketOrds.get(ordIdx);
                         collectZeroDocEntriesIfNeeded(owningBucketOrd);
                         final int size = (int) Math.min(bucketOrds.bucketsInOrd(owningBucketOrd), bucketCountThresholds.getShardSize());
@@ -727,8 +728,10 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
                     }
                     try (LongArray ordsArray = bigArrays().newLongArray(ordsToCollect)) {
                         long ordsCollected = 0;
+                        long bucketsVisited = 0;
                         GlobalOrdLookupFunction lookupGlobalOrd = valuesSupplier.get()::lookupOrd;
                         for (long ordIdx = 0; ordIdx < topBucketsPreOrd.size(); ordIdx++) {
+                            checkCancelledWhileBuilding();
                             long owningBucketOrd = owningBucketOrds.get(ordIdx);
                             try (
                                 ObjectArrayPriorityQueue<BucketAndOrd<TB>> ordered = collectionStrategy.buildPriorityQueue(
@@ -739,6 +742,7 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
                                 LongKeyedBucketOrds.BucketOrdsEnum ordsEnum = bucketOrds.ordsEnum(owningBucketOrd);
                                 BucketAndOrd<TB> spare = null;
                                 while (ordsEnum.next()) {
+                                    checkCancelledWhileBuilding(++bucketsVisited);
                                     long docCount = bucketDocCount(ordsEnum.ord());
                                     otherDocCount.increment(ordIdx, docCount);
                                     if (docCount < bucketCountThresholds.getShardMinDocCount()) {

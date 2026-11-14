@@ -325,6 +325,32 @@ public abstract class AggregatorTestCase extends ESTestCase {
         );
     }
 
+    /**
+     * Create a {@linkplain AggregationContext} whose
+     * {@link AggregationContext#isCancelled()} answers from {@code isCancelled},
+     * for tests of where an {@link Aggregator} checks for cancellation. Like
+     * the other contexts it is released automatically in
+     * {@link #cleanupReleasables()}.
+     */
+    protected AggregationContext createAggregationContext(
+        IndexReader indexReader,
+        Query query,
+        Supplier<Boolean> isCancelled,
+        MappedFieldType... fieldTypes
+    ) throws IOException {
+        return createAggregationContext(
+            newIndexSearcher(indexReader, false),
+            createIndexSettings(),
+            query,
+            new NoneCircuitBreakerService(),
+            AggregationBuilder.DEFAULT_PREALLOCATION * 5,
+            DEFAULT_MAX_BUCKETS,
+            false,
+            isCancelled,
+            fieldTypes
+        );
+    }
+
     private AggregationContext createAggregationContext(
         IndexSearcher searcher,
         IndexSettings indexSettings,

@@ -150,6 +150,38 @@ public abstract class BucketsAggregator extends AggregatorBase {
     protected void prepareSubAggs(LongArray ordsToCollect) throws IOException {}
 
     /**
+     * How many buckets the result building loops visit between two checks
+     * for cancellation. Must be a power of two.
+     */
+    public static final long BUILD_CANCELLATION_CHECK_INTERVAL = 1 << 13;
+
+    /**
+     * Throw {@link TaskCancelledException} if the search was cancelled.
+     * Building results visits every collected bucket of every owning bucket,
+     * which takes a long time when an aggregation collected many buckets
+     * under many owning buckets. Result building loops call this before each
+     * owning bucket and, through {@link #checkCancelledWhileBuilding(long)},
+     * every {@link #BUILD_CANCELLATION_CHECK_INTERVAL} buckets, so a
+     * cancelled search stops building soon after it is cancelled.
+     */
+    protected final void checkCancelledWhileBuilding() {
+        if (context.isCancelled()) {
+            throw new TaskCancelledException("not building aggregation results due to task cancellation");
+        }
+    }
+
+    /**
+     * Call {@link #checkCancelledWhileBuilding()} once every
+     * {@link #BUILD_CANCELLATION_CHECK_INTERVAL} visited buckets.
+     * @param visitedBuckets the number of buckets visited so far, counted from one
+     */
+    protected final void checkCancelledWhileBuilding(long visitedBuckets) {
+        if ((visitedBuckets & (BUILD_CANCELLATION_CHECK_INTERVAL - 1)) == 0) {
+            checkCancelledWhileBuilding();
+        }
+    }
+
+    /**
      * Build the results of the sub-aggregations of the buckets at each of
      * the provided ordinals.
      * <p>
@@ -331,6 +363,7 @@ public abstract class BucketsAggregator extends AggregatorBase {
         long totalOrdsToCollect = 0;
         try (IntArray bucketsInOrd = bigArrays().newIntArray(owningBucketOrds.size())) {
             for (long ordIdx = 0; ordIdx < owningBucketOrds.size(); ordIdx++) {
+                checkCancelledWhileBuilding();
                 final long bucketCount = bucketOrds.bucketsInOrd(owningBucketOrds.get(ordIdx));
                 bucketsInOrd.set(ordIdx, (int) bucketCount);
                 totalOrdsToCollect += bucketCount;
@@ -346,15 +379,18 @@ public abstract class BucketsAggregator extends AggregatorBase {
             try (LongArray bucketOrdsToCollect = bigArrays().newLongArray(totalOrdsToCollect)) {
                 final int[] b = new int[] { 0 };
                 for (long i = 0; i < owningBucketOrds.size(); i++) {
+                    checkCancelledWhileBuilding();
                     LongKeyedBucketOrds.BucketOrdsEnum ordsEnum = bucketOrds.ordsEnum(owningBucketOrds.get(i));
                     while (ordsEnum.next()) {
                         bucketOrdsToCollect.set(b[0]++, ordsEnum.ord());
+                        checkCancelledWhileBuilding(b[0]);
                     }
                 }
                 var subAggregationResults = buildSubAggsForBuckets(bucketOrdsToCollect);
 
                 b[0] = 0;
                 return buildAggregations(Math.toIntExact(owningBucketOrds.size()), ordIdx -> {
+                    checkCancelledWhileBuilding();
                     final long owningBucketOrd = owningBucketOrds.get(ordIdx);
                     List<B> buckets = new ArrayList<>(bucketsInOrd.get(ordIdx));
                     LongKeyedBucketOrds.BucketOrdsEnum ordsEnum = bucketOrds.ordsEnum(owningBucketOrd);

@@ -334,6 +334,7 @@ public final class MapStringTermsAggregator extends AbstractStringTermsAggregato
                 try (IntArray bucketsToCollect = bigArrays().newIntArray(owningBucketOrds.size())) {
                     long ordsToCollect = 0;
                     for (long ordIdx = 0; ordIdx < owningBucketOrds.size(); ordIdx++) {
+                        checkCancelledWhileBuilding();
                         final long owningBucketOrd = owningBucketOrds.get(ordIdx);
                         collectZeroDocEntriesIfNeeded(owningBucketOrd, excludeDeletedDocs);
                         final int size = (int) Math.min(bucketOrds.bucketsInOrd(owningBucketOrd), bucketCountThresholds.getShardSize());
@@ -342,13 +343,16 @@ public final class MapStringTermsAggregator extends AbstractStringTermsAggregato
                     }
                     try (LongArray ordsArray = bigArrays().newLongArray(ordsToCollect)) {
                         long ordsCollected = 0;
+                        long bucketsVisited = 0;
                         for (long ordIdx = 0; ordIdx < topBucketsPerOrd.size(); ordIdx++) {
+                            checkCancelledWhileBuilding();
                             long owningOrd = owningBucketOrds.get(ordIdx);
                             try (ObjectArrayPriorityQueue<BucketAndOrd<B>> ordered = buildPriorityQueue(bucketsToCollect.get(ordIdx))) {
                                 BucketAndOrd<B> spare = null;
                                 BytesKeyedBucketOrds.BucketOrdsEnum ordsEnum = bucketOrds.ordsEnum(owningOrd);
                                 BucketUpdater<B> bucketUpdater = bucketUpdater(owningOrd);
                                 while (ordsEnum.next()) {
+                                    checkCancelledWhileBuilding(++bucketsVisited);
                                     long docCount = bucketDocCount(ordsEnum.ord());
                                     otherDocCounts.increment(ordIdx, docCount);
                                     if (docCount < bucketCountThresholds.getShardMinDocCount()) {
