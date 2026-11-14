@@ -100,8 +100,8 @@ public abstract class XNumericComparator<T extends Number> extends FieldComparat
         /**
          * The doc values of the sort field in this segment, loaded on the first call. Leaf comparators are built for every
          * segment before the query is known to match anything in it, and on many segments no sort value is ever read
-         * (no matching document, or the competitive iterator skips them all), so opening doc values is deferred to the
-         * first comparison or copy.
+         * (no matching document, or the competitive iterator skips them all), so the doc values are opened on the first
+         * comparison or copy.
          */
         protected final NumericDocValues docValues() throws IOException {
             if (docValues == null) {

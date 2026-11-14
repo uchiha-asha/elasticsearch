@@ -50,10 +50,13 @@ import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
 import org.elasticsearch.test.ESTestCase;
 
 import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.lessThanOrEqualTo;
 
 public class XLongComparatorTests extends ESTestCase {
 
@@ -74,7 +77,7 @@ public class XLongComparatorTests extends ESTestCase {
                 }
             }
             AtomicInteger opens = new AtomicInteger();
-            try (DirectoryReader reader = new CountingDirectoryReader(DirectoryReader.open(dir), opens)) {
+            try (DirectoryReader reader = new CountingDirectoryReader(DirectoryReader.open(dir), r -> opens.incrementAndGet())) {
                 LeafReaderContext leaf = reader.leaves().getFirst();
                 XLongComparator comparator = (XLongComparator) source(randomFrom(MultiValueMode.MIN, MultiValueMode.MAX)).newComparator(
                     FIELD,
@@ -101,7 +104,7 @@ public class XLongComparatorTests extends ESTestCase {
     /**
      * Top hits and sort values, first page and {@code search_after} pages, match Lucene's own {@link SortedNumericSortField}
      * on a multi-segment index with missing and multi-valued fields and a query that matches few segments; doc values are
-     * opened only on segments that hold a match.
+     * opened only on segments that hold a match, with and without the competitive iterator pruning documents.
      */
     public void testSortMatchesLuceneSortOnSparseMatches() throws IOException {
         try (Directory dir = newDirectory()) {
@@ -127,15 +130,15 @@ public class XLongComparatorTests extends ESTestCase {
                     writer.flush();
                 }
             }
-            AtomicInteger opens = new AtomicInteger();
-            try (DirectoryReader reader = new CountingDirectoryReader(DirectoryReader.open(dir), opens)) {
+            Set<LeafReader> opened = ConcurrentHashMap.newKeySet();
+            try (DirectoryReader reader = new CountingDirectoryReader(DirectoryReader.open(dir), opened::add)) {
                 IndexSearcher searcher = newSearcher(reader, false, false);
                 Query query = new TermQuery(new Term("tag", "match"));
-                int matchingLeaves = 0;
+                Set<LeafReader> matchingLeaves = new HashSet<>();
                 Weight weight = searcher.createWeight(searcher.rewrite(query), ScoreMode.COMPLETE_NO_SCORES, 1f);
                 for (LeafReaderContext leaf : reader.leaves()) {
                     if (weight.scorer(leaf) != null) {
-                        matchingLeaves++;
+                        matchingLeaves.add(leaf.reader());
                     }
                 }
                 MultiValueMode mode = randomFrom(MultiValueMode.MIN, MultiValueMode.MAX);
@@ -153,26 +156,31 @@ public class XLongComparatorTests extends ESTestCase {
                     FIELD,
                     SortField.Type.LONG,
                     reverse,
-                    mode == MultiValueMode.MAX ? SortedNumericSelector.Type.MAX : SortedNumericSelector.Type.MIN
+                    mode == MultiValueMode.MAX ? SortedNumericSelector.Type.MAX : SortedNumericSelector.Type.MIN,
+                    source.missingObject(missing, reverse)
                 );
-                luceneSortField.setMissingValue(source.missingObject(missing, reverse));
                 // tie-break on doc id so both sorts define one order
                 Sort esSort = new Sort(esSortField, SortField.FIELD_DOC);
                 Sort luceneSort = new Sort(luceneSortField, SortField.FIELD_DOC);
 
                 int size = between(1, 10);
+                // a low threshold lets the competitive iterator skip documents and whole segments
+                int totalHitsThreshold = randomFrom(1, size, Integer.MAX_VALUE);
                 FieldDoc esAfter = null;
                 FieldDoc luceneAfter = null;
                 int pages = 0;
                 while (true) {
-                    opens.set(0);
-                    TopFieldDocs esHits = searcher.search(query, new TopFieldCollectorManager(esSort, size, esAfter, Integer.MAX_VALUE));
-                    assertThat(opens.get(), lessThanOrEqualTo(matchingLeaves));
+                    opened.clear();
+                    TopFieldDocs esHits = searcher.search(query, new TopFieldCollectorManager(esSort, size, esAfter, totalHitsThreshold));
+                    // the comparator and the competitive iterator only open doc values on segments with a match
+                    assertTrue(matchingLeaves.containsAll(opened));
                     TopFieldDocs luceneHits = searcher.search(
                         query,
                         new TopFieldCollectorManager(luceneSort, size, luceneAfter, Integer.MAX_VALUE)
                     );
-                    assertThat(esHits.totalHits, equalTo(luceneHits.totalHits));
+                    if (totalHitsThreshold == Integer.MAX_VALUE) {
+                        assertThat(esHits.totalHits, equalTo(luceneHits.totalHits));
+                    }
                     assertThat(esHits.scoreDocs.length, equalTo(luceneHits.scoreDocs.length));
                     for (int i = 0; i < esHits.scoreDocs.length; i++) {
                         FieldDoc es = (FieldDoc) esHits.scoreDocs[i];
@@ -206,13 +214,13 @@ public class XLongComparatorTests extends ESTestCase {
     }
 
     /**
-     * Counts how often the sort field's doc values are opened. The cache helpers of the wrapped readers are passed through
-     * so the wrapper does not change caching behaviour.
+     * Reports each segment reader on which the sort field's doc values are opened. The cache helpers of the wrapped readers
+     * are passed through so the wrapper does not change caching behaviour.
      */
     private static class CountingDirectoryReader extends FilterDirectoryReader {
-        private final AtomicInteger opens;
+        private final Consumer<LeafReader> onOpen;
 
-        CountingDirectoryReader(DirectoryReader in, AtomicInteger opens) throws IOException {
+        CountingDirectoryReader(DirectoryReader in, Consumer<LeafReader> onOpen) throws IOException {
             super(in, new SubReaderWrapper() {
                 @Override
                 public LeafReader wrap(LeafReader reader) {
@@ -220,7 +228,7 @@ public class XLongComparatorTests extends ESTestCase {
                         @Override
                         public SortedNumericDocValues getSortedNumericDocValues(String field) throws IOException {
                             if (field.equals(FIELD)) {
-                                opens.incrementAndGet();
+                                onOpen.accept(this);
                             }
                             return super.getSortedNumericDocValues(field);
                         }
@@ -237,12 +245,12 @@ public class XLongComparatorTests extends ESTestCase {
                     };
                 }
             });
-            this.opens = opens;
+            this.onOpen = onOpen;
         }
 
         @Override
         protected DirectoryReader doWrapDirectoryReader(DirectoryReader in) throws IOException {
-            return new CountingDirectoryReader(in, opens);
+            return new CountingDirectoryReader(in, onOpen);
         }
 
         @Override
