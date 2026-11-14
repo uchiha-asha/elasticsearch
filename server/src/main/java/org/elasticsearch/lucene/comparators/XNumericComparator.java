@@ -89,13 +89,25 @@ public abstract class XNumericComparator<T extends Number> extends FieldComparat
     /** Leaf comparator for {@link org.apache.lucene.search.comparators.NumericComparator} that provides skipping functionality */
     public abstract class NumericLeafComparator implements LeafFieldComparator {
         private final LeafReaderContext context;
-        protected final NumericDocValues docValues;
+        private NumericDocValues docValues;
         private final CompetitiveDISIBuilder competitiveDISIBuilder;
 
         public NumericLeafComparator(LeafReaderContext context) throws IOException {
             this.context = context;
-            this.docValues = getNumericDocValues(context, field);
             competitiveDISIBuilder = buildCompetitiveDISIBuilder(context);
+        }
+
+        /**
+         * The doc values of the sort field in this segment, loaded on the first call. Leaf comparators are built for every
+         * segment before the query is known to match anything in it, and on many segments no sort value is ever read
+         * (no matching document, or the competitive iterator skips them all), so opening doc values is deferred to the
+         * first comparison or copy.
+         */
+        protected final NumericDocValues docValues() throws IOException {
+            if (docValues == null) {
+                docValues = getNumericDocValues(context, field);
+            }
+            return docValues;
         }
 
         protected CompetitiveDISIBuilder buildCompetitiveDISIBuilder(LeafReaderContext context) throws IOException {

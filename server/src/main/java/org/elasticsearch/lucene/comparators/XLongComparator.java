@@ -10,6 +10,7 @@
 package org.elasticsearch.lucene.comparators;
 
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.search.LeafFieldComparator;
 import org.apache.lucene.search.Pruning;
 import org.apache.lucene.search.comparators.LongComparator;
@@ -73,6 +74,7 @@ public class XLongComparator extends XNumericComparator<Long> {
         }
 
         private long getValueForDoc(int doc) throws IOException {
+            final NumericDocValues docValues = docValues();
             if (docValues.advanceExact(doc)) {
                 return docValues.longValue();
             } else {
