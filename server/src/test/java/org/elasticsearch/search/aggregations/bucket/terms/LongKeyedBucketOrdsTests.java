@@ -9,16 +9,21 @@
 
 package org.elasticsearch.search.aggregations.bucket.terms;
 
+import org.elasticsearch.common.breaker.CircuitBreaker;
+import org.elasticsearch.common.breaker.CircuitBreakingException;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.util.MockBigArrays;
 import org.elasticsearch.common.util.MockPageCacheRecycler;
 import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
 import org.elasticsearch.search.aggregations.CardinalityUpperBound;
 import org.elasticsearch.test.ESTestCase;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -180,6 +185,137 @@ public class LongKeyedBucketOrdsTests extends ESTestCase {
         assertThat(ords.bucketsInOrd(randomLongBetween(maxOwningBucketOrd + 1, Long.MAX_VALUE)), equalTo(0L));
 
         assertThat(ords.maxOwningBucketOrd(), equalTo(maxOwningBucketOrd));
+    }
+
+    /**
+     * Adds buckets to owning buckets while enumerators over those owning
+     * buckets are open: each enumerator visits every bucket of its owning
+     * bucket in increasing ordinal order, including buckets added after the
+     * enumerator was created.
+     */
+    public void testInterleavedAddsAndEnumeration() {
+        try (LongKeyedBucketOrds ords = randomManyOwnersOrds(4, 1000)) {
+            // An enumerator created before its owning bucket has any buckets sees later adds
+            LongKeyedBucketOrds.BucketOrdsEnum emptyAtStart = ords.ordsEnum(2);
+            assertFalse(emptyAtStart.next());
+
+            assertThat(ords.add(0, 10), equalTo(0L));
+            assertThat(ords.add(1, 10), equalTo(1L));
+            assertThat(ords.add(0, 11), equalTo(2L));
+
+            LongKeyedBucketOrds.BucketOrdsEnum owner0 = ords.ordsEnum(0);
+            assertTrue(owner0.next());
+            assertThat(owner0.ord(), equalTo(0L));
+            assertThat(owner0.value(), equalTo(10L));
+
+            // Adds to this and other owning buckets while positioned in the middle
+            assertThat(ords.add(2, 12), equalTo(3L));
+            assertThat(ords.add(0, 12), equalTo(4L));
+            assertThat(ords.add(0, 10), equalTo(-1L));
+            assertThat(ords.bucketsInOrd(0), equalTo(3L));
+
+            assertTrue(owner0.next());
+            assertThat(owner0.ord(), equalTo(2L));
+            assertThat(owner0.value(), equalTo(11L));
+            assertTrue(owner0.next());
+            assertThat(owner0.ord(), equalTo(4L));
+            assertThat(owner0.value(), equalTo(12L));
+            assertFalse(owner0.next());
+
+            // Positioned at the end, then a new bucket is appended
+            assertThat(ords.add(0, 13), equalTo(5L));
+            assertTrue(owner0.next());
+            assertThat(owner0.ord(), equalTo(5L));
+            assertThat(owner0.value(), equalTo(13L));
+            assertFalse(owner0.next());
+
+            assertTrue(emptyAtStart.next());
+            assertThat(emptyAtStart.ord(), equalTo(3L));
+            assertThat(emptyAtStart.value(), equalTo(12L));
+            assertFalse(emptyAtStart.next());
+
+            assertThat(ords.bucketsInOrd(1), equalTo(1L));
+            assertThat(ords.bucketsInOrd(2), equalTo(1L));
+            assertThat(ords.bucketsInOrd(3), equalTo(0L));
+            assertFalse(ords.ordsEnum(3).next());
+            assertThat(ords.maxOwningBucketOrd(), equalTo(2L));
+        }
+    }
+
+    /**
+     * Owning buckets that only appear far apart and late still report their
+     * buckets and the highest owning bucket ordinal.
+     */
+    public void testSparseOwningBuckets() {
+        int maxOwningBucketOrd = between(100, 5000);
+        try (LongKeyedBucketOrds ords = randomManyOwnersOrds(maxOwningBucketOrd, 1000)) {
+            assertThat(ords.maxOwningBucketOrd(), equalTo(-1L));
+            assertThat(ords.bucketsInOrd(0), equalTo(0L));
+            assertFalse(ords.ordsEnum(0).next());
+
+            long owner = maxOwningBucketOrd;
+            assertThat(ords.add(owner, 1), equalTo(0L));
+            assertThat(ords.maxOwningBucketOrd(), equalTo(owner));
+            assertThat(ords.add(3, 1), equalTo(1L));
+            assertThat(ords.add(owner, 2), equalTo(2L));
+            assertThat(ords.maxOwningBucketOrd(), equalTo(owner));
+
+            assertThat(ords.bucketsInOrd(owner), equalTo(2L));
+            assertThat(ords.bucketsInOrd(3), equalTo(1L));
+            assertThat(ords.bucketsInOrd(owner - 1), equalTo(0L));
+            assertThat(ords.bucketsInOrd(owner + 1), equalTo(0L));
+            assertThat(collectOrds(ords, owner), equalTo(List.of(0L, 2L)));
+            assertThat(collectOrds(ords, 3), equalTo(List.of(1L)));
+            assertThat(collectOrds(ords, 0), equalTo(List.of()));
+        }
+    }
+
+    /**
+     * A circuit breaker trip while the per owning bucket lists grow leaves
+     * nothing allocated once the ords are closed.
+     */
+    public void testReleasesOnCircuitBreakerTrip() {
+        MockBigArrays limited = new MockBigArrays(new MockPageCacheRecycler(Settings.EMPTY), ByteSizeValue.ofKb(between(32, 512)));
+        CircuitBreaker breaker = limited.breakerService().getBreaker(CircuitBreaker.REQUEST);
+        boolean small = randomBoolean();
+        LongKeyedBucketOrds ords = small ? new LongKeyedBucketOrds.FromManySmall(limited, 32) : new LongKeyedBucketOrds.FromMany(limited);
+        try {
+            expectThrows(CircuitBreakingException.class, () -> {
+                for (long i = 0; i < 10_000_000; i++) {
+                    ords.add(randomLongBetween(0, 100_000), i);
+                }
+            });
+        } finally {
+            ords.close();
+        }
+        assertThat(breaker.getUsed(), equalTo(0L));
+    }
+
+    /**
+     * Builds an ords that maps many owning buckets, picking at random between
+     * the hash of {@code owningBucketOrd, value} pairs and the packed variant.
+     */
+    private LongKeyedBucketOrds randomManyOwnersOrds(int maxOwningBucketOrd, long maxValue) {
+        if (randomBoolean()) {
+            return LongKeyedBucketOrds.build(bigArrays, CardinalityUpperBound.MANY);
+        }
+        LongKeyedBucketOrds ords = LongKeyedBucketOrds.buildForValueRange(
+            bigArrays,
+            CardinalityUpperBound.ONE.multiply(maxOwningBucketOrd + 1),
+            0,
+            maxValue
+        );
+        assertTrue(ords instanceof LongKeyedBucketOrds.FromManySmall);
+        return ords;
+    }
+
+    private static List<Long> collectOrds(LongKeyedBucketOrds ords, long owningBucketOrd) {
+        List<Long> result = new ArrayList<>();
+        LongKeyedBucketOrds.BucketOrdsEnum ordsEnum = ords.ordsEnum(owningBucketOrd);
+        while (ordsEnum.next()) {
+            result.add(ordsEnum.ord());
+        }
+        return result;
     }
 
     public void testKeyIteratorSingleValue() {

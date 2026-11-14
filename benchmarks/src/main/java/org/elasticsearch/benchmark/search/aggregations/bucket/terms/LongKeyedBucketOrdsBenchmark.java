@@ -22,6 +22,7 @@ import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.Mode;
 import org.openjdk.jmh.annotations.OperationsPerInvocation;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
+import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
@@ -215,5 +216,124 @@ public class LongKeyedBucketOrdsBenchmark {
             throw new IllegalArgumentException("Expected [" + DISTINCT_VALUES + "] but found [" + ords.size() + "]");
         }
         bh.consume(ords);
+    }
+
+    /**
+     * Shapes of owning buckets for the {@link #collectFromManyOwners collect}
+     * and {@link #collectAndBuildFromManyOwners collect and build} benchmarks.
+     * Each shape adds {@link #OWNED_BUCKETS} buckets.
+     */
+    @State(Scope.Benchmark)
+    public static class ManyOwners {
+        /**
+         * {@code dense}: 1,000 owning buckets with 100 buckets each, all 1,000 are built.
+         * {@code sparse}: 1,000 owning buckets spread over ordinals up to 10,000, all 10,000 are built.
+         * {@code single}: one owning bucket with all buckets, 1,000 owning buckets are built.
+         */
+        @Param({ "dense", "sparse", "single" })
+        public String shape;
+
+        /**
+         * {@code many} hashes the {@code owningBucketOrd, value} pair, {@code small} packs it into one {@code long}.
+         */
+        @Param({ "many", "small" })
+        public String impl;
+
+        long[] owners;
+        long[] values;
+        long builtOwners;
+
+        @Setup
+        public void setup() {
+            owners = new long[OWNED_BUCKETS];
+            values = new long[OWNED_BUCKETS];
+            for (int i = 0; i < OWNED_BUCKETS; i++) {
+                switch (shape) {
+                    case "dense" -> {
+                        owners[i] = i % 1_000;
+                        values[i] = i / 1_000;
+                    }
+                    case "sparse" -> {
+                        owners[i] = (i % 1_000) * 10L;
+                        values[i] = i / 1_000;
+                    }
+                    case "single" -> {
+                        owners[i] = 0;
+                        values[i] = i;
+                    }
+                    default -> throw new IllegalArgumentException("unknown shape [" + shape + "]");
+                }
+            }
+            builtOwners = switch (shape) {
+                case "dense", "single" -> 1_000;
+                case "sparse" -> 10_000;
+                default -> throw new IllegalArgumentException("unknown shape [" + shape + "]");
+            };
+        }
+
+        LongKeyedBucketOrds newOrds(BigArrays bigArrays) {
+            return switch (impl) {
+                case "many" -> new LongKeyedBucketOrds.FromMany(bigArrays);
+                case "small" -> new LongKeyedBucketOrds.FromManySmall(bigArrays, 32);
+                default -> throw new IllegalArgumentException("unknown impl [" + impl + "]");
+            };
+        }
+    }
+
+    /**
+     * The number of buckets added by each {@link ManyOwners} shape.
+     */
+    private static final int OWNED_BUCKETS = 100_000;
+
+    /**
+     * Collects {@link ManyOwners} without building results, to show the cost
+     * that tracking buckets per owning bucket adds to collection.
+     */
+    @Benchmark
+    @OperationsPerInvocation(1)
+    @OutputTimeUnit(TimeUnit.MICROSECONDS)
+    public void collectFromManyOwners(ManyOwners state, Blackhole bh) {
+        try (LongKeyedBucketOrds ords = state.newOrds(bigArrays)) {
+            collect(state, ords);
+            bh.consume(ords);
+        }
+    }
+
+    /**
+     * Collects {@link ManyOwners} and then reads them the way aggregations
+     * build results: count the buckets of each owning bucket, then
+     * enumerate each owning bucket's buckets.
+     */
+    @Benchmark
+    @OperationsPerInvocation(1)
+    @OutputTimeUnit(TimeUnit.MICROSECONDS)
+    public void collectAndBuildFromManyOwners(ManyOwners state, Blackhole bh) {
+        try (LongKeyedBucketOrds ords = state.newOrds(bigArrays)) {
+            collect(state, ords);
+            long total = 0;
+            for (long owner = 0; owner < state.builtOwners; owner++) {
+                total += ords.bucketsInOrd(owner);
+            }
+            for (long owner = 0; owner < state.builtOwners; owner++) {
+                LongKeyedBucketOrds.BucketOrdsEnum ordsEnum = ords.ordsEnum(owner);
+                while (ordsEnum.next()) {
+                    bh.consume(ordsEnum.value());
+                    total--;
+                }
+            }
+            if (total != 0) {
+                throw new IllegalArgumentException("counted and enumerated buckets differ by [" + total + "]");
+            }
+            bh.consume(ords);
+        }
+    }
+
+    private static void collect(ManyOwners state, LongKeyedBucketOrds ords) {
+        for (int i = 0; i < OWNED_BUCKETS; i++) {
+            ords.add(state.owners[i], state.values[i]);
+        }
+        if (ords.size() != OWNED_BUCKETS) {
+            throw new IllegalArgumentException("Expected [" + OWNED_BUCKETS + "] but found [" + ords.size() + "]");
+        }
     }
 }

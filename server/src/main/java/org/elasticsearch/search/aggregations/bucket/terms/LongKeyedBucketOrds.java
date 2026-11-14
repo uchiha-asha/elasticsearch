@@ -10,9 +10,11 @@
 package org.elasticsearch.search.aggregations.bucket.terms;
 
 import org.elasticsearch.common.util.BigArrays;
+import org.elasticsearch.common.util.LongArray;
 import org.elasticsearch.common.util.LongHash;
 import org.elasticsearch.common.util.LongLongHash;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.core.Releasables;
 import org.elasticsearch.search.aggregations.CardinalityUpperBound;
 
 import java.util.Iterator;
@@ -299,15 +301,30 @@ public abstract class LongKeyedBucketOrds implements Releasable {
      */
     public static class FromMany extends LongKeyedBucketOrds {
         private final LongLongHash ords;
+        private final OwnerChains chains;
 
         public FromMany(BigArrays bigArrays) {
             ords = new LongLongHash(2, bigArrays);
+            boolean success = false;
+            try {
+                chains = new OwnerChains(bigArrays);
+                success = true;
+            } finally {
+                if (success == false) {
+                    ords.close();
+                }
+            }
         }
 
         @Override
         public long add(long owningBucketOrd, long value) {
             // This is in the critical path for collecting most aggs. Be careful of performance.
-            return ords.add(owningBucketOrd, value);
+            chains.ensureOwner(owningBucketOrd);
+            long ord = ords.add(owningBucketOrd, value);
+            if (ord >= 0) {
+                chains.append(owningBucketOrd, ord);
+            }
+            return ord;
         }
 
         @Override
@@ -322,14 +339,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
 
         @Override
         public long bucketsInOrd(long owningBucketOrd) {
-            // TODO it'd be faster to count the number of buckets in a list of these ords rather than one at a time
-            long count = 0;
-            for (long i = 0; i < ords.size(); i++) {
-                if (ords.getKey1(i) == owningBucketOrd) {
-                    count++;
-                }
-            }
-            return count;
+            return chains.count(owningBucketOrd);
         }
 
         @Override
@@ -339,12 +349,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
 
         @Override
         public long maxOwningBucketOrd() {
-            // TODO this is fairly expensive to compute. Can we avoid needing it?
-            long max = -1;
-            for (long i = 0; i < ords.size(); i++) {
-                max = Math.max(max, ords.getKey1(i));
-            }
-            return max;
+            return chains.maxOwningBucketOrd();
         }
 
         @Override
@@ -354,33 +359,10 @@ public abstract class LongKeyedBucketOrds implements Releasable {
 
         @Override
         public BucketOrdsEnum ordsEnum(long owningBucketOrd) {
-            // TODO it'd be faster to iterate many ords at once rather than one at a time
-            return new BucketOrdsEnum() {
-                private long ord = -1;
-                private long value;
-
+            return new ChainedOrdsEnum(chains, owningBucketOrd) {
                 @Override
-                public boolean next() {
-                    while (true) {
-                        ord++;
-                        if (ord >= ords.size()) {
-                            return false;
-                        }
-                        if (ords.getKey1(ord) == owningBucketOrd) {
-                            value = ords.getKey2(ord);
-                            return true;
-                        }
-                    }
-                }
-
-                @Override
-                public long value() {
-                    return value;
-                }
-
-                @Override
-                public long ord() {
-                    return ord;
+                protected long valueOf(long ord) {
+                    return ords.getKey2(ord);
                 }
             };
         }
@@ -388,7 +370,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
         @Override
         public void close() {
             super.close();
-            ords.close();
+            Releasables.close(ords, chains);
         }
     }
 
@@ -398,11 +380,21 @@ public abstract class LongKeyedBucketOrds implements Releasable {
      */
     public static class FromManySmall extends LongKeyedBucketOrds {
         private final LongHash ords;
+        private final OwnerChains chains;
         private final int owningBucketOrdShift;
         private final long owningBucketOrdMask;
 
         public FromManySmall(BigArrays bigArrays, int owningBucketOrdShift) {
             ords = new LongHash(2, bigArrays);
+            boolean success = false;
+            try {
+                chains = new OwnerChains(bigArrays);
+                success = true;
+            } finally {
+                if (success == false) {
+                    ords.close();
+                }
+            }
             this.owningBucketOrdShift = owningBucketOrdShift;
             this.owningBucketOrdMask = -1L << owningBucketOrdShift;
         }
@@ -428,7 +420,12 @@ public abstract class LongKeyedBucketOrds implements Releasable {
                     )
                 );
             }
-            return ords.add(enc);
+            chains.ensureOwner(owningBucketOrd);
+            long ord = ords.add(enc);
+            if (ord >= 0) {
+                chains.append(owningBucketOrd, ord);
+            }
+            return ord;
         }
 
         @Override
@@ -449,18 +446,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
 
         @Override
         public long bucketsInOrd(long owningBucketOrd) {
-            // TODO it'd be faster to count the number of buckets in a list of these ords rather than one at a time
-            if (Long.numberOfLeadingZeros(owningBucketOrd) < owningBucketOrdShift) {
-                return 0;
-            }
-            long count = 0;
-            long enc = owningBucketOrd << owningBucketOrdShift;
-            for (long i = 0; i < ords.size(); i++) {
-                if ((ords.get(i) & owningBucketOrdMask) == enc) {
-                    count++;
-                }
-            }
-            return count;
+            return chains.count(owningBucketOrd);
         }
 
         @Override
@@ -470,12 +456,7 @@ public abstract class LongKeyedBucketOrds implements Releasable {
 
         @Override
         public long maxOwningBucketOrd() {
-            // TODO this is fairly expensive to compute. Can we avoid needing it?
-            long max = -1;
-            for (long i = 0; i < ords.size(); i++) {
-                max = Math.max(max, (ords.get(i) & owningBucketOrdMask) >>> owningBucketOrdShift);
-            }
-            return max;
+            return chains.maxOwningBucketOrd();
         }
 
         @Override
@@ -485,38 +466,13 @@ public abstract class LongKeyedBucketOrds implements Releasable {
 
         @Override
         public BucketOrdsEnum ordsEnum(long owningBucketOrd) {
-            // TODO it'd be faster to iterate many ords at once rather than one at a time
             if (Long.numberOfLeadingZeros(owningBucketOrd) < owningBucketOrdShift) {
                 return BucketOrdsEnum.EMPTY;
             }
-            final long encodedOwningBucketOrd = owningBucketOrd << owningBucketOrdShift;
-            return new BucketOrdsEnum() {
-                private long ord = -1;
-                private long value;
-
+            return new ChainedOrdsEnum(chains, owningBucketOrd) {
                 @Override
-                public boolean next() {
-                    while (true) {
-                        ord++;
-                        if (ord >= ords.size()) {
-                            return false;
-                        }
-                        long encoded = ords.get(ord);
-                        if ((encoded & owningBucketOrdMask) == encodedOwningBucketOrd) {
-                            value = encoded & ~owningBucketOrdMask;
-                            return true;
-                        }
-                    }
-                }
-
-                @Override
-                public long value() {
-                    return value;
-                }
-
-                @Override
-                public long ord() {
-                    return ord;
+                protected long valueOf(long ord) {
+                    return ords.get(ord) & ~owningBucketOrdMask;
                 }
             };
         }
@@ -524,7 +480,159 @@ public abstract class LongKeyedBucketOrds implements Releasable {
         @Override
         public void close() {
             super.close();
-            ords.close();
+            Releasables.close(ords, chains);
+        }
+    }
+
+    /**
+     * Links the bucket ordinals of each owning bucket into a list, in the
+     * order they were added, so that counting and iterating the buckets of
+     * one owning bucket costs time proportional to that owning bucket's
+     * buckets rather than to all collected buckets. Building results visits
+     * every owning bucket, so a full scan per owning bucket would cost
+     * {@code owning buckets * total buckets}.
+     * <p>
+     * Uses one {@code long} per bucket ordinal plus three per owning bucket
+     * ordinal up to the highest one added. Ordinals are stored plus one so
+     * the zeroes of freshly allocated pages mean "none".
+     */
+    static final class OwnerChains implements Releasable {
+        private final BigArrays bigArrays;
+        /**
+         * For each bucket ordinal, the next bucket ordinal of the same owning bucket, plus one.
+         */
+        private LongArray next;
+        /**
+         * For each owning bucket ordinal, its first bucket ordinal, plus one.
+         */
+        private LongArray heads;
+        /**
+         * For each owning bucket ordinal, its last bucket ordinal, plus one.
+         */
+        private LongArray tails;
+        /**
+         * For each owning bucket ordinal, its number of buckets.
+         */
+        private LongArray counts;
+        private long maxOwningBucketOrd = -1;
+
+        OwnerChains(BigArrays bigArrays) {
+            this.bigArrays = bigArrays;
+            boolean success = false;
+            try {
+                next = bigArrays.newLongArray(1, true);
+                heads = bigArrays.newLongArray(1, true);
+                tails = bigArrays.newLongArray(1, true);
+                counts = bigArrays.newLongArray(1, true);
+                success = true;
+            } finally {
+                if (success == false) {
+                    close();
+                }
+            }
+        }
+
+        /**
+         * Make room for {@code owningBucketOrd}. Called before the bucket is
+         * added to the hash so that a failure to allocate leaves no bucket
+         * ordinal without a place in the lists.
+         */
+        void ensureOwner(long owningBucketOrd) {
+            assert owningBucketOrd >= 0 : "owning bucket ordinals are never negative but got [" + owningBucketOrd + "]";
+            if (owningBucketOrd >= heads.size()) {
+                heads = bigArrays.grow(heads, owningBucketOrd + 1);
+                tails = bigArrays.grow(tails, owningBucketOrd + 1);
+                counts = bigArrays.grow(counts, owningBucketOrd + 1);
+            }
+        }
+
+        /**
+         * Append a newly added bucket ordinal to the end of its owning bucket's list.
+         */
+        void append(long owningBucketOrd, long ord) {
+            next = bigArrays.grow(next, ord + 1);
+            long tail = tails.get(owningBucketOrd);
+            if (tail == 0) {
+                heads.set(owningBucketOrd, ord + 1);
+            } else {
+                next.set(tail - 1, ord + 1);
+            }
+            tails.set(owningBucketOrd, ord + 1);
+            counts.increment(owningBucketOrd, 1);
+            maxOwningBucketOrd = Math.max(maxOwningBucketOrd, owningBucketOrd);
+        }
+
+        long count(long owningBucketOrd) {
+            if (owningBucketOrd < 0 || owningBucketOrd > maxOwningBucketOrd) {
+                return 0;
+            }
+            return counts.get(owningBucketOrd);
+        }
+
+        long maxOwningBucketOrd() {
+            return maxOwningBucketOrd;
+        }
+
+        /**
+         * The first bucket ordinal of {@code owningBucketOrd}, or {@code -1} if it has none.
+         */
+        long first(long owningBucketOrd) {
+            if (owningBucketOrd < 0 || owningBucketOrd > maxOwningBucketOrd) {
+                return -1;
+            }
+            return heads.get(owningBucketOrd) - 1;
+        }
+
+        /**
+         * The bucket ordinal after {@code ord} in the same owning bucket, or {@code -1} if there is none.
+         */
+        long next(long ord) {
+            return next.get(ord) - 1;
+        }
+
+        @Override
+        public void close() {
+            Releasables.close(next, heads, tails, counts);
+        }
+    }
+
+    /**
+     * Walks one owning bucket's list in {@link OwnerChains}. Reads each link
+     * when advancing, so buckets appended to the owning bucket while
+     * iterating are visited.
+     */
+    private abstract static class ChainedOrdsEnum implements BucketOrdsEnum {
+        private final OwnerChains chains;
+        private final long owningBucketOrd;
+        private long ord = -1;
+        private long value;
+
+        ChainedOrdsEnum(OwnerChains chains, long owningBucketOrd) {
+            this.chains = chains;
+            this.owningBucketOrd = owningBucketOrd;
+        }
+
+        protected abstract long valueOf(long ord);
+
+        @Override
+        public boolean next() {
+            long nextOrd = ord < 0 ? chains.first(owningBucketOrd) : chains.next(ord);
+            if (nextOrd < 0) {
+                return false;
+            }
+            ord = nextOrd;
+            value = valueOf(ord);
+            return true;
+        }
+
+        @Override
+        public long value() {
+            return value;
+        }
+
+        @Override
+        public long ord() {
+            return ord;
         }
     }
 }
