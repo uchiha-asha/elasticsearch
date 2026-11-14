@@ -12,6 +12,7 @@ package org.elasticsearch.search.aggregations.bucket.histogram;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
+import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.store.Directory;
@@ -24,9 +25,12 @@ import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.elasticsearch.search.aggregations.AggregationBuilder;
 import org.elasticsearch.search.aggregations.AggregatorTestCase;
+import org.elasticsearch.search.aggregations.bucket.BucketsAggregator;
+import org.elasticsearch.search.aggregations.bucket.terms.TermsAggregationBuilder;
 import org.elasticsearch.search.aggregations.metrics.Min;
 import org.elasticsearch.search.aggregations.metrics.MinAggregationBuilder;
 import org.elasticsearch.search.aggregations.support.AggregationInspectionHelper;
+import org.elasticsearch.tasks.TaskCancelledException;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -39,6 +43,13 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 
 public class NumericHistogramAggregatorTests extends AggregatorTestCase {
+    /**
+     * The cancellation checks a top level {@code terms} on a long makes while
+     * building results before its sub-aggregations start building theirs:
+     * before counting and before enumerating its only owning bucket, and
+     * before building its sub-aggregations.
+     */
+    private static final long OUTER_TERMS_CHECKS = 3;
 
     public void testLongs() throws Exception {
         try (Directory dir = newDirectory(); RandomIndexWriter w = new RandomIndexWriter(random(), dir)) {
@@ -457,5 +468,67 @@ public class NumericHistogramAggregatorTests extends AggregatorTestCase {
             }
         };
         testCase(buildIndex, verify, new AggTestConfig(request, longField("outer"), longField("inner"), longField("n")));
+    }
+
+    /**
+     * A {@code histogram} under a {@code terms} is cancelled after collection
+     * at a random one of the checks it makes before each owning bucket while
+     * counting and collecting its buckets. Every other outer bucket has no
+     * histogram buckets.
+     */
+    public void testCancelledWhileBuildingUnderTerms() throws IOException {
+        int outerBuckets = between(2, 200);
+        try (Directory directory = newDirectory()) {
+            try (RandomIndexWriter indexWriter = new RandomIndexWriter(random(), directory)) {
+                for (int outer = 0; outer < outerBuckets; outer++) {
+                    Document document = new Document();
+                    document.add(new SortedNumericDocValuesField("outer", outer));
+                    if (outer % 2 == 0) {
+                        for (int inner = 0; inner < 3; inner++) {
+                            document.add(new SortedNumericDocValuesField("inner", outer * 10 + inner));
+                        }
+                    }
+                    indexWriter.addDocument(document);
+                }
+            }
+            long cancelAtCheck = OUTER_TERMS_CHECKS + randomLongBetween(0, 2L * outerBuckets - 1);
+            assertCancelledWhileBuilding(directory, outerBuckets, cancelAtCheck);
+        }
+    }
+
+    /**
+     * A {@code histogram} under a single bucket {@code terms} has more buckets
+     * than {@link BucketsAggregator#BUILD_CANCELLATION_CHECK_INTERVAL} and is
+     * cancelled at the first check made while collecting them, after its
+     * checks before counting and before collecting that owning bucket.
+     */
+    public void testCancelledWhileBuildingLargeOwningBucket() throws IOException {
+        int histogramBuckets = BucketsAggregator.BUILD_CANCELLATION_CHECK_INTERVAL + between(0, 100);
+        try (Directory directory = newDirectory()) {
+            try (RandomIndexWriter indexWriter = new RandomIndexWriter(random(), directory)) {
+                List<Document> documents = new ArrayList<>(histogramBuckets);
+                for (int i = 0; i < histogramBuckets; i++) {
+                    Document document = new Document();
+                    document.add(new SortedNumericDocValuesField("outer", 0));
+                    document.add(new SortedNumericDocValuesField("inner", i));
+                    documents.add(document);
+                }
+                indexWriter.addDocuments(documents);
+            }
+            assertCancelledWhileBuilding(directory, 1, OUTER_TERMS_CHECKS + 2);
+        }
+    }
+
+    private void assertCancelledWhileBuilding(Directory directory, int outerBuckets, long cancelAtCheck) throws IOException {
+        TermsAggregationBuilder builder = new TermsAggregationBuilder("outer").field("outer")
+            .size(outerBuckets)
+            .subAggregation(new HistogramAggregationBuilder("inner").field("inner").interval(1));
+        try (IndexReader reader = DirectoryReader.open(directory)) {
+            TaskCancelledException e = expectThrows(
+                TaskCancelledException.class,
+                () -> buildCancelledAtCheck(reader, builder, cancelAtCheck, longField("outer"), longField("inner"))
+            );
+            assertThat(e.getMessage(), equalTo("not building aggregation results due to task cancellation"));
+        }
     }
 }

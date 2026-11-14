@@ -131,12 +131,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.function.Supplier;
 import java.util.stream.LongStream;
 
 import static java.util.Collections.singleton;
@@ -157,6 +154,13 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 
 public class TermsAggregatorTests extends AggregatorTestCase {
+    /**
+     * The cancellation checks a top level {@code terms} on a long makes while
+     * building results before its sub-aggregations start building theirs:
+     * before counting and before enumerating its only owning bucket, and
+     * before building its sub-aggregations.
+     */
+    private static final long OUTER_TERMS_CHECKS = 3;
 
     private boolean randomizeAggregatorImpl = true;
 
@@ -2364,14 +2368,10 @@ public class TermsAggregatorTests extends AggregatorTestCase {
      * A {@code terms} under a {@code terms} is cancelled after collection at a
      * random one of the checks the inner aggregation makes before each owning
      * bucket while building results. Every other outer bucket has no inner
-     * buckets, so some checks are for owning buckets without buckets. The
-     * outer {@code terms} is on a number and checks three times before the
-     * inner one starts building: before counting and before enumerating its
-     * only owning bucket, and before building its sub-aggregations.
+     * buckets, so some checks are for owning buckets without buckets.
      */
     public void testCancelledWhileBuildingSubTermsResults() throws IOException {
         int outerBuckets = between(2, 200);
-        String innerType = randomFrom("long", "keyword_map", "keyword_global_ordinals");
         try (Directory directory = newDirectory()) {
             try (RandomIndexWriter indexWriter = new RandomIndexWriter(random(), directory)) {
                 for (int outer = 0; outer < outerBuckets; outer++) {
@@ -2379,103 +2379,76 @@ public class TermsAggregatorTests extends AggregatorTestCase {
                     document.add(new SortedNumericDocValuesField("outer", outer));
                     if (outer % 2 == 0) {
                         for (int inner = 0; inner < 3; inner++) {
-                            document.add(new SortedNumericDocValuesField("inner_long", outer * 10 + inner));
-                            document.add(new SortedSetDocValuesField("inner_keyword", new BytesRef("v" + (outer * 10 + inner))));
+                            addInnerValue(document, outer * 10 + inner);
                         }
                     }
                     indexWriter.addDocument(document);
                 }
             }
-            TermsAggregationBuilder inner = switch (innerType) {
-                case "long" -> new TermsAggregationBuilder("inner").field("inner_long");
-                case "keyword_map" -> new TermsAggregationBuilder("inner").field("inner_keyword").executionHint("map");
-                case "keyword_global_ordinals" -> new TermsAggregationBuilder("inner").field("inner_keyword")
-                    .executionHint("global_ordinals");
-                default -> throw new AssertionError("unknown inner type [" + innerType + "]");
-            };
-            TermsAggregationBuilder builder = new TermsAggregationBuilder("outer").field("outer").size(outerBuckets).subAggregation(inner);
-            long cancelAtCheck = 3 + randomLongBetween(0, 2L * outerBuckets - 1);
-            try (IndexReader reader = DirectoryReader.open(directory)) {
-                TaskCancelledException e = expectThrows(
-                    TaskCancelledException.class,
-                    () -> collectThenBuildCancelledAtCheck(
-                        reader,
-                        builder,
-                        cancelAtCheck,
-                        new NumberFieldMapper.NumberFieldType("outer", NumberType.LONG),
-                        new NumberFieldMapper.NumberFieldType("inner_long", NumberType.LONG),
-                        new KeywordFieldMapper.KeywordFieldType("inner_keyword")
-                    )
-                );
-                assertThat(e.getMessage(), equalTo("not building aggregation results due to task cancellation"));
-            }
+            TermsAggregationBuilder builder = new TermsAggregationBuilder("outer").field("outer")
+                .size(outerBuckets)
+                .subAggregation(randomInnerTerms());
+            long cancelAtCheck = OUTER_TERMS_CHECKS + randomLongBetween(0, 2L * outerBuckets - 1);
+            assertCancelledWhileBuilding(directory, builder, cancelAtCheck);
         }
     }
 
     /**
-     * A top level {@code terms} with more buckets than
-     * {@link BucketsAggregator#BUILD_CANCELLATION_CHECK_INTERVAL} is cancelled
-     * after collection at the first check made while enumerating its only
-     * owning bucket's buckets, after the checks before counting and before
-     * enumerating that owning bucket.
+     * A {@code terms} under a single bucket {@code terms} has more buckets
+     * than {@link BucketsAggregator#BUILD_CANCELLATION_CHECK_INTERVAL} and is
+     * cancelled at the first check made while enumerating them, after its
+     * checks before counting and before enumerating that owning bucket.
      */
     public void testCancelledWhileBuildingLargeOwningBucket() throws IOException {
-        int buckets = Math.toIntExact(BucketsAggregator.BUILD_CANCELLATION_CHECK_INTERVAL) + between(0, 100);
-        boolean keyword = randomBoolean();
+        int innerBuckets = BucketsAggregator.BUILD_CANCELLATION_CHECK_INTERVAL + between(0, 100);
         try (Directory directory = newDirectory()) {
             try (RandomIndexWriter indexWriter = new RandomIndexWriter(random(), directory)) {
-                List<Document> documents = new ArrayList<>(buckets);
-                for (int i = 0; i < buckets; i++) {
+                List<Document> documents = new ArrayList<>(innerBuckets);
+                for (int i = 0; i < innerBuckets; i++) {
                     Document document = new Document();
-                    document.add(new SortedNumericDocValuesField("number", i));
-                    document.add(new SortedSetDocValuesField("string", new BytesRef("v" + i)));
+                    document.add(new SortedNumericDocValuesField("outer", 0));
+                    addInnerValue(document, i);
                     documents.add(document);
                 }
                 indexWriter.addDocuments(documents);
             }
-            TermsAggregationBuilder builder = keyword
-                ? new TermsAggregationBuilder("terms").field("string").executionHint("map")
-                : new TermsAggregationBuilder("terms").field("number");
-            try (IndexReader reader = DirectoryReader.open(directory)) {
-                TaskCancelledException e = expectThrows(
-                    TaskCancelledException.class,
-                    () -> collectThenBuildCancelledAtCheck(
-                        reader,
-                        builder,
-                        2,
-                        new NumberFieldMapper.NumberFieldType("number", NumberType.LONG),
-                        new KeywordFieldMapper.KeywordFieldType("string")
-                    )
-                );
-                assertThat(e.getMessage(), equalTo("not building aggregation results due to task cancellation"));
-            }
+            TermsAggregationBuilder builder = new TermsAggregationBuilder("outer").field("outer").subAggregation(randomInnerTerms());
+            assertCancelledWhileBuilding(directory, builder, OUTER_TERMS_CHECKS + 2);
         }
     }
 
+    private static void addInnerValue(Document document, long value) {
+        document.add(new SortedNumericDocValuesField("inner_long", value));
+        document.add(new SortedSetDocValuesField("inner_keyword", new BytesRef("v" + value)));
+    }
+
     /**
-     * Collect every document, then build the results with a context that
-     * reports the search as cancelled from the {@code cancelAtCheck}th
-     * (counted from zero) call to {@link AggregationContext#isCancelled()}
-     * made after collection.
+     * An inner {@code terms} on a long, on a keyword with {@code map}
+     * execution, or on a keyword with global ordinals.
      */
-    private void collectThenBuildCancelledAtCheck(
-        IndexReader reader,
-        TermsAggregationBuilder builder,
-        long cancelAtCheck,
-        MappedFieldType... fieldTypes
-    ) throws IOException {
-        AtomicBoolean collected = new AtomicBoolean();
-        AtomicLong checks = new AtomicLong();
-        Supplier<Boolean> isCancelled = () -> collected.get() && checks.getAndIncrement() >= cancelAtCheck;
-        AggregationContext context = createAggregationContext(reader, Queries.ALL_DOCS_INSTANCE, isCancelled, fieldTypes);
-        // Closing the context releases the aggregators it built
-        try (context) {
-            Aggregator aggregator = createAggregator(builder, context);
-            aggregator.preCollection();
-            context.searcher().search(context.query(), singleThreadedCollectorManager(aggregator.asCollector()));
-            aggregator.postCollection();
-            collected.set(true);
-            aggregator.buildTopLevel();
+    private static TermsAggregationBuilder randomInnerTerms() {
+        return switch (between(0, 2)) {
+            case 0 -> new TermsAggregationBuilder("inner").field("inner_long");
+            case 1 -> new TermsAggregationBuilder("inner").field("inner_keyword").executionHint("map");
+            case 2 -> new TermsAggregationBuilder("inner").field("inner_keyword").executionHint("global_ordinals");
+            default -> throw new AssertionError("unexpected inner terms");
+        };
+    }
+
+    private void assertCancelledWhileBuilding(Directory directory, TermsAggregationBuilder builder, long cancelAtCheck) throws IOException {
+        try (IndexReader reader = DirectoryReader.open(directory)) {
+            TaskCancelledException e = expectThrows(
+                TaskCancelledException.class,
+                () -> buildCancelledAtCheck(
+                    reader,
+                    builder,
+                    cancelAtCheck,
+                    new NumberFieldMapper.NumberFieldType("outer", NumberType.LONG),
+                    new NumberFieldMapper.NumberFieldType("inner_long", NumberType.LONG),
+                    new KeywordFieldMapper.KeywordFieldType("inner_keyword")
+                )
+            );
+            assertThat(e.getMessage(), equalTo("not building aggregation results due to task cancellation"));
         }
     }
 

@@ -179,6 +179,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -326,29 +328,38 @@ public abstract class AggregatorTestCase extends ESTestCase {
     }
 
     /**
-     * Create a {@linkplain AggregationContext} whose
-     * {@link AggregationContext#isCancelled()} answers from {@code isCancelled},
-     * for tests of where an {@link Aggregator} checks for cancellation. Like
-     * the other contexts it is released automatically in
-     * {@link #cleanupReleasables()}.
+     * Collect every document, then build the top level aggregation with a
+     * context that reports the search as cancelled from the
+     * {@code cancelAtCheck}th (counted from zero) call to
+     * {@link AggregationContext#isCancelled()} made after collection. For
+     * tests of where an {@link Aggregator} checks for cancellation while it
+     * builds results: count the checks the aggregators make before the one
+     * under test.
      */
-    protected AggregationContext createAggregationContext(
-        IndexReader indexReader,
-        Query query,
-        Supplier<Boolean> isCancelled,
-        MappedFieldType... fieldTypes
-    ) throws IOException {
-        return createAggregationContext(
-            newIndexSearcher(indexReader, false),
+    protected void buildCancelledAtCheck(IndexReader reader, AggregationBuilder builder, long cancelAtCheck, MappedFieldType... fieldTypes)
+        throws IOException {
+        AtomicBoolean collected = new AtomicBoolean();
+        AtomicLong checks = new AtomicLong();
+        AggregationContext context = createAggregationContext(
+            newIndexSearcher(reader, false),
             createIndexSettings(),
-            query,
+            Queries.ALL_DOCS_INSTANCE,
             new NoneCircuitBreakerService(),
             AggregationBuilder.DEFAULT_PREALLOCATION * 5,
             DEFAULT_MAX_BUCKETS,
             false,
-            isCancelled,
+            () -> collected.get() && checks.getAndIncrement() >= cancelAtCheck,
             fieldTypes
         );
+        // Closing the context releases the aggregators it built
+        try (context) {
+            Aggregator aggregator = createAggregator(builder, context);
+            aggregator.preCollection();
+            context.searcher().search(context.query(), singleThreadedCollectorManager(aggregator.asCollector()));
+            aggregator.postCollection();
+            collected.set(true);
+            aggregator.buildTopLevel();
+        }
     }
 
     private AggregationContext createAggregationContext(

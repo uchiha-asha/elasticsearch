@@ -42,6 +42,11 @@ import java.util.function.LongUnaryOperator;
 import java.util.function.ToLongFunction;
 
 public abstract class BucketsAggregator extends AggregatorBase {
+    /**
+     * How many buckets the result building loops visit between two checks
+     * for cancellation. Must be a power of two.
+     */
+    public static final int BUILD_CANCELLATION_CHECK_INTERVAL = 1 << 13;
 
     private LongArray docCounts;
     protected final DocCountProvider docCountProvider;
@@ -150,19 +155,11 @@ public abstract class BucketsAggregator extends AggregatorBase {
     protected void prepareSubAggs(LongArray ordsToCollect) throws IOException {}
 
     /**
-     * How many buckets the result building loops visit between two checks
-     * for cancellation. Must be a power of two.
-     */
-    public static final long BUILD_CANCELLATION_CHECK_INTERVAL = 1 << 13;
-
-    /**
      * Throw {@link TaskCancelledException} if the search was cancelled.
-     * Building results visits every collected bucket of every owning bucket,
-     * which takes a long time when an aggregation collected many buckets
-     * under many owning buckets. Result building loops call this before each
-     * owning bucket and, through {@link #checkCancelledWhileBuilding(long)},
-     * every {@link #BUILD_CANCELLATION_CHECK_INTERVAL} buckets, so a
-     * cancelled search stops building soon after it is cancelled.
+     * Result building loops call this before each owning bucket and,
+     * through {@link #checkCancelledWhileBuilding(long)}, every
+     * {@link #BUILD_CANCELLATION_CHECK_INTERVAL} buckets, so a cancelled
+     * search stops building soon after it is cancelled.
      */
     protected final void checkCancelledWhileBuilding() {
         if (context.isCancelled()) {
