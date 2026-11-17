@@ -23,7 +23,9 @@ import org.elasticsearch.xpack.esql.expression.function.FunctionDefinition;
 import org.elasticsearch.xpack.esql.expression.function.FunctionInfo;
 import org.elasticsearch.xpack.esql.expression.function.FunctionType;
 import org.elasticsearch.xpack.esql.expression.function.Param;
+import org.elasticsearch.xpack.esql.expression.function.scalar.conditional.Case;
 import org.elasticsearch.xpack.esql.expression.function.scalar.multivalue.MvAvg;
+import org.elasticsearch.xpack.esql.expression.predicate.nulls.IsNotNull;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.arithmetic.Div;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.arithmetic.Mul;
 import org.elasticsearch.xpack.esql.expression.unit.UnitAware;
@@ -39,6 +41,8 @@ import static org.elasticsearch.xpack.esql.core.expression.TypeResolutions.isTyp
 public class WeightedAvg extends AggregateFunction implements OnlySurrogateExpression, AnyNullIsNull, UnitAware.PreservesUnit {
     public static final FunctionDefinition DEFINITION = FunctionDefinition.def(WeightedAvg.class)
         .binary(WeightedAvg::new)
+        // Rows whose value is null do not add their weight to the denominator.
+        .capabilities("ignore_weight_of_null_values")
         .name("weighted_avg");
 
     private static final String invalidWeightError = "{} argument of [{}] cannot be null or 0, received [{}]";
@@ -149,10 +153,12 @@ public class WeightedAvg extends AggregateFunction implements OnlySurrogateExpre
                 dataType()
             );
         } else {
+            // A row contributes its weight only when it also contributes a value, matching AVG and the constant-weight path.
+            Expression weightOfNonNullValues = new Case(s, new IsNotNull(s, field), List.of(weight));
             return new Div(
                 s,
                 new Sum(s, new Mul(s, field, weight), filter(), window(), SummationMode.COMPENSATED_LITERAL),
-                new Sum(s, weight, filter(), window(), SummationMode.COMPENSATED_LITERAL),
+                new Sum(s, weightOfNonNullValues, filter(), window(), SummationMode.COMPENSATED_LITERAL),
                 dataType()
             );
         }

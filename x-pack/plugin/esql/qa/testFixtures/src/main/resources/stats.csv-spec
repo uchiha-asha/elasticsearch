@@ -2446,6 +2446,41 @@ w_avg:double
 null
 ;
 
+weightedAvgSkipsWeightOfNullValues
+required_capability: fn_weighted_avg_ignore_weight_of_null_values
+from employees
+| stats w_avg = round(weighted_avg(languages, height), 4)
+;
+
+w_avg:double
+3.1427
+;
+
+weightedAvgSkipsWeightOfNullValuesMinimal
+required_capability: fn_weighted_avg_ignore_weight_of_null_values
+from employees
+| where emp_no <= 10002
+| eval v = case(emp_no == 10001, 10, null), w = emp_no - emp_no + 1
+| stats w_avg = weighted_avg(v, w)
+;
+
+w_avg:double
+10.0
+;
+
+weightedAvgSkipsWeightOfNullValuesGrouped
+required_capability: fn_weighted_avg_ignore_weight_of_null_values
+from employees
+| stats w_avg = round(weighted_avg(languages, height), 4) by gender
+| sort gender
+;
+
+w_avg:double | gender:keyword
+3.3865       | F
+2.994        | M
+3.1489       | null
+;
+
 weightedAvgWeightZero
 required_capability: agg_weighted_avg
 from employees

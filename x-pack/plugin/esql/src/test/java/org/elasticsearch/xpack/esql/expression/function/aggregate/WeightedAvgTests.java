@@ -18,6 +18,7 @@ import org.elasticsearch.xpack.esql.expression.function.MultiRowTestCaseSupplier
 import org.elasticsearch.xpack.esql.expression.function.TestCaseSupplier;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.function.Supplier;
@@ -28,6 +29,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
 public class WeightedAvgTests extends AbstractAggregationTestCase {
+    private static final int NULL_VALUE_CASE_ROWS = 1000;
+    private static final List<DataType> NUMERIC_TYPES = List.of(DataType.INTEGER, DataType.LONG, DataType.DOUBLE);
+
     public WeightedAvgTests(@Name("TestCase") Supplier<TestCaseSupplier.TestCase> testCaseSupplier) {
         this.testCase = testCaseSupplier.get();
     }
@@ -60,6 +64,14 @@ public class WeightedAvgTests extends AbstractAggregationTestCase {
         for (var number : noRowsCases) {
             for (var weight : noRowsCases) {
                 suppliers.add(makeSupplier(number, weight));
+            }
+        }
+
+        // Null values with non-null weights: those rows add neither their value nor their weight
+        for (DataType numberType : NUMERIC_TYPES) {
+            for (DataType weightType : NUMERIC_TYPES) {
+                suppliers.add(makeSupplier(someNullValuesSupplier(numberType), positiveWeightsSupplier(weightType)));
+                suppliers.add(makeSupplier(allNullValuesSupplier(numberType), positiveWeightsSupplier(weightType)));
             }
         }
 
@@ -149,9 +161,16 @@ public class WeightedAvgTests extends AbstractAggregationTestCase {
                 // Calculate the results one by one to correctly track overflows and exceptions
                 var validMulResults = new ArrayList<Double>();
                 var validMulLongResults = new ArrayList<Long>();
+                // Rows with a null value or a null weight have a null product and add their weight to the total only
+                // when both the value and the weight are present
+                var contributingWeights = new ArrayList<Number>();
                 for (int i = 0; i < fieldValues.size(); i++) {
                     Number fieldNum = (Number) fieldValues.get(i);
                     Number weightNum = (Number) weightValues.get(i);
+                    if (fieldNum == null || weightNum == null) {
+                        continue;
+                    }
+                    contributingWeights.add(weightNum);
 
                     if (mulType == DataType.INTEGER) {
                         try {
@@ -200,19 +219,19 @@ public class WeightedAvgTests extends AbstractAggregationTestCase {
                 Double totalWeights;
                 if (weightTypedData.type() == DataType.LONG) {
                     try {
-                        long longWeightSum = weightValues.stream().mapToLong(v -> ((Number) v).longValue()).reduce(0L, Math::addExact);
+                        long longWeightSum = contributingWeights.stream().mapToLong(Number::longValue).reduce(0L, Math::addExact);
                         totalWeights = (double) longWeightSum;
                     } catch (ArithmeticException e) {
                         totalWeights = null;
                         warnings.add("Line 1:1: java.lang.ArithmeticException: long overflow");
                     }
                 } else {
-                    totalWeights = weightValues.stream().mapToDouble(v -> ((Number) v).doubleValue()).sum();
+                    totalWeights = contributingWeights.stream().mapToDouble(Number::doubleValue).sum();
                 }
 
                 Double expected = null;
                 if (weightedSum != null && totalWeights != null) {
-                    if (totalWeights == 0.0 && fieldValues.isEmpty() == false) {
+                    if (totalWeights == 0.0 && contributingWeights.isEmpty() == false) {
                         warnings.add("Line 1:1: java.lang.ArithmeticException: / by zero");
                     } else if (totalWeights != 0.0) {
                         var result = weightedSum / totalWeights;
@@ -236,5 +255,51 @@ public class WeightedAvgTests extends AbstractAggregationTestCase {
                 ).withWarnings(warnings);
             }
         );
+    }
+
+    /**
+     * Small values, so no product overflows, with at least one null and at least one non-null row.
+     */
+    private static TestCaseSupplier.TypedDataSupplier someNullValuesSupplier(DataType type) {
+        return new TestCaseSupplier.TypedDataSupplier(type.typeName() + " with nulls", () -> {
+            List<Object> values = new ArrayList<>(NULL_VALUE_CASE_ROWS);
+            values.add(randomSmallNumber(type, -1000, 1000));
+            values.add(null);
+            for (int i = 2; i < NULL_VALUE_CASE_ROWS; i++) {
+                values.add(randomBoolean() ? null : randomSmallNumber(type, -1000, 1000));
+            }
+            Collections.shuffle(values, random());
+            return values;
+        }, type, false, true, List.of());
+    }
+
+    private static TestCaseSupplier.TypedDataSupplier allNullValuesSupplier(DataType type) {
+        return new TestCaseSupplier.TypedDataSupplier(
+            type.typeName() + " all nulls",
+            () -> Collections.nCopies(NULL_VALUE_CASE_ROWS, null),
+            type,
+            false,
+            true,
+            List.of()
+        );
+    }
+
+    private static TestCaseSupplier.TypedDataSupplier positiveWeightsSupplier(DataType type) {
+        return new TestCaseSupplier.TypedDataSupplier(type.typeName() + " positive weights", () -> {
+            List<Object> values = new ArrayList<>(NULL_VALUE_CASE_ROWS);
+            for (int i = 0; i < NULL_VALUE_CASE_ROWS; i++) {
+                values.add(randomSmallNumber(type, 1, 1000));
+            }
+            return values;
+        }, type, false, true, List.of());
+    }
+
+    private static Object randomSmallNumber(DataType type, int min, int max) {
+        return switch (type) {
+            case INTEGER -> randomIntBetween(min, max);
+            case LONG -> (long) randomIntBetween(min, max);
+            case DOUBLE -> randomDoubleBetween(min, max, true);
+            default -> throw new IllegalArgumentException("unsupported type [" + type + "]");
+        };
     }
 }
