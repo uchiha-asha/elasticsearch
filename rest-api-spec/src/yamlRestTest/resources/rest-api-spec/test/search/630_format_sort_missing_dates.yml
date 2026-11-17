@@ -153,3 +153,96 @@
   - match: {hits.hits.1.sort: ["2021-10-13T00:30:04.828123Z"]}
   - match: {hits.hits.2._id: "3"}
   - match: {hits.hits.2.sort: ["2021-06-11T04:30:04.828456Z"]}
+
+---
+"Sort missing last does not drop hits from shards without values":
+  - requires:
+      test_runner_features: [capabilities]
+      capabilities:
+        - method: POST
+          path: /_search
+          capabilities: [sort_missing_last_bottom_not_disjoint]
+      reason: a missing-last bottom sort value keeps shards without values in the search
+
+  - do:
+      indices.create:
+        index: test_missing_last_1
+        body:
+          settings:
+            number_of_shards: 1
+          mappings:
+            properties:
+              d:
+                type: date
+              id:
+                type: keyword
+
+  - do:
+      indices.create:
+        index: test_missing_last_2
+        body:
+          settings:
+            number_of_shards: 1
+          mappings:
+            properties:
+              d:
+                type: date
+              id:
+                type: keyword
+
+  - do:
+      indices.create:
+        index: test_missing_last_3
+        body:
+          settings:
+            number_of_shards: 1
+          mappings:
+            properties:
+              d:
+                type: date
+              id:
+                type: keyword
+
+  - do:
+      bulk:
+        refresh: true
+        body: |
+          {"index":{"_index": "test_missing_last_1", "_id": "b"}}
+          {"id": "b"}
+          {"index":{"_index": "test_missing_last_3", "_id": "a"}}
+          {"id": "a"}
+
+  - do:
+      search:
+        index: test_missing_last_*
+        max_concurrent_shard_requests: 1
+        body:
+          size: 1
+          from: 0
+          sort: [{d: {order: desc, missing: _last}}, {id: asc}]
+  - match: {hits.total.value: 2}
+  - length: {hits.hits: 1}
+  - match: {hits.hits.0._id: "a"}
+
+  - do:
+      search:
+        index: test_missing_last_*
+        max_concurrent_shard_requests: 1
+        body:
+          size: 1
+          from: 1
+          sort: [{d: {order: desc, missing: _last}}, {id: asc}]
+  - match: {hits.total.value: 2}
+  - length: {hits.hits: 1}
+  - match: {hits.hits.0._id: "b"}
+
+  - do:
+      search:
+        index: test_missing_last_*
+        max_concurrent_shard_requests: 1
+        body:
+          size: 1
+          sort: [{d: {order: asc}}, {id: asc}]
+  - match: {hits.total.value: 2}
+  - length: {hits.hits: 1}
+  - match: {hits.hits.0._id: "a"}

@@ -92,6 +92,8 @@ public final class SearchCapabilities {
 
     /** Scripts that enumerate or return the {@code doc} or {@code _fields} lookup are rejected with a 400. */
     private static final String DOC_LOOKUP_ENUMERATION_ILLEGAL_ARGUMENT = "doc_lookup_enumeration_illegal_argument";
+    /** A primary sort bottom value that is the missing-last value of the sort never makes a shard skip its hits. */
+    private static final String SORT_MISSING_LAST_BOTTOM_NOT_DISJOINT = "sort_missing_last_bottom_not_disjoint";
 
     public static final Set<String> CAPABILITIES;
     static {
@@ -139,6 +141,7 @@ public final class SearchCapabilities {
         capabilities.add(COMPOSITE_AGG_REJECTS_NON_POSITIVE_SIZE);
         capabilities.add(NUMERIC_VALUE_SCRIPT_NULL_IS_MISSING);
         capabilities.add(DOC_LOOKUP_ENUMERATION_ILLEGAL_ARGUMENT);
+        capabilities.add(SORT_MISSING_LAST_BOTTOM_NOT_DISJOINT);
         CAPABILITIES = Set.copyOf(capabilities);
     }
 }

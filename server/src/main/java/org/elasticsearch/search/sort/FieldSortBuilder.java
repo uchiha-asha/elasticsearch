@@ -386,7 +386,8 @@ public final class FieldSortBuilder extends SortBuilder<FieldSortBuilder> {
 
     /**
      * Returns whether some values of the given {@link SearchExecutionContext#getIndexReader()} are within the
-     * primary sort value provided in the <code>bottomSortValues</code>.
+     * primary sort value provided in the <code>bottomSortValues</code>. A bottom value that is the missing-last
+     * sentinel never makes a shard disjoint, since documents without a value tie with it.
      */
     public boolean isBottomSortShardDisjoint(SearchExecutionContext context, SearchSortValuesAndFormats bottomSortValues)
         throws IOException {
@@ -413,6 +414,10 @@ public final class FieldSortBuilder extends SortBuilder<FieldSortBuilder> {
             dateMathParser = null;
         }
         Object bottomSortValue = bottomSortValues.getFormattedSortValues()[0];
+        if (bottomSortValue == null || isMissingSortValue(context, fieldType, bottomSortValues.getRawSortValues()[0])) {
+            // the bottom hit has no value for the field, so the documents of this shard without a value tie with it
+            return false;
+        }
         Object minValue = order() == SortOrder.DESC ? bottomSortValue : null;
         Object maxValue = order() == SortOrder.DESC ? null : bottomSortValue;
         try {
@@ -431,6 +436,37 @@ public final class FieldSortBuilder extends SortBuilder<FieldSortBuilder> {
             // can happen if the sort field is mapped differently in another search index
             return false;
         }
+    }
+
+    /**
+     * Returns whether {@code rawSortValue} is the value that this sort gives to documents without a value on this shard.
+     * The value depends on the field type and the sort order: a descending sort uses {@link Long#MIN_VALUE} on a
+     * {@code date} field but {@code 0}, the earliest nanosecond date, on a {@code date_nanos} field.
+     */
+    private boolean isMissingSortValue(SearchExecutionContext context, MappedFieldType fieldType, Object rawSortValue) {
+        if (fieldType.hasDocValues() == false) {
+            return false;
+        }
+        IndexFieldData<?> fieldData = context.getForField(fieldType, MappedFieldType.FielddataOperation.SEARCH);
+        if (fieldData instanceof IndexNumericFieldData == false) {
+            return false;
+        }
+        IndexNumericFieldData numericFieldData = (IndexNumericFieldData) fieldData;
+        final boolean reverse = order == SortOrder.DESC;
+        final SortField sortField;
+        if (numericType != null) {
+            NumericType resolvedType = resolveNumericType(numericType);
+            sortField = numericFieldData.sortField(resolvedType, missing, localSortMode(), null, reverse);
+        } else {
+            sortField = numericFieldData.sortField(false, context.indexVersionCreated(), missing, localSortMode(), null, reverse);
+        }
+        final Object missingSortValue;
+        if (sortField.getComparatorSource() instanceof IndexFieldData.XFieldComparatorSource comparatorSource) {
+            missingSortValue = comparatorSource.missingObject(missing, reverse);
+        } else {
+            missingSortValue = sortField.getMissingValue();
+        }
+        return Objects.equals(missingSortValue, rawSortValue);
     }
 
     @Override

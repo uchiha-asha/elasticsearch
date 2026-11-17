@@ -2083,6 +2083,66 @@ public class FieldSortIT extends ESIntegTestCase {
         }
     }
 
+    /**
+     * Three single-shard indices where only the first and the last hold documents, none of which has a value for the
+     * date sort field. The shards live on the node that coordinates the search, which queries them one at a time, so with
+     * a page size of one the coordinator sends the missing value of the first shard's hit as the bottom sort value to the
+     * remaining shards. These must still return their documents because they tie with it on the primary sort.
+     */
+    public void testSortMissingLastDoesNotSkipShardsWithoutValues() throws Exception {
+        String node = internalCluster().getRandomDataNodeName();
+        for (String type : List.of("date", "date_nanos")) {
+            String prefix = "missing_last_" + type + "_";
+            for (int i = 1; i <= 3; i++) {
+                assertAcked(
+                    prepareCreate(prefix + i).setSettings(indexSettings(1, 0).put("index.routing.allocation.require._name", node))
+                        .setMapping("d", "type=" + type, "id", "type=keyword")
+                );
+            }
+            indexRandom(
+                true,
+                prepareIndex(prefix + 1).setId("b").setSource("id", "b"),
+                prepareIndex(prefix + 3).setId("a").setSource("id", "a")
+            );
+            for (SortOrder order : SortOrder.values()) {
+                for (String missing : Arrays.asList("_last", null)) {
+                    FieldSortBuilder primarySort = SortBuilders.fieldSort("d").order(order).missing(missing);
+                    Object[] firstHitSortValues = assertSingleHitPage(node, prefix, primarySort, 0, null, "a");
+                    assertSingleHitPage(node, prefix, primarySort, 1, null, "b");
+                    assertSingleHitPage(node, prefix, primarySort, 0, firstHitSortValues, "b");
+                }
+            }
+        }
+    }
+
+    private static Object[] assertSingleHitPage(
+        String node,
+        String indexPrefix,
+        FieldSortBuilder primarySort,
+        int from,
+        Object[] searchAfter,
+        String expectedId
+    ) {
+        SearchRequestBuilder request = client(node).prepareSearch(indexPrefix + "*")
+            .setMaxConcurrentShardRequests(1)
+            .setQuery(matchAllQuery())
+            .setFrom(from)
+            .setSize(1)
+            .addSort(primarySort)
+            .addSort(SortBuilders.fieldSort("id").order(SortOrder.ASC));
+        if (searchAfter != null) {
+            request.searchAfter(searchAfter);
+        }
+        Object[][] sortValues = new Object[1][];
+        assertNoFailuresAndResponse(request, response -> {
+            assertHitCount(response, 2);
+            assertThat(response.getHits().getHits().length, equalTo(1));
+            assertThat(response.getHits().getAt(0).getId(), equalTo(expectedId));
+            sortValues[0] = response.getHits().getAt(0).getSortValues();
+        });
+        return sortValues[0];
+    }
+
     public void testCastDate() throws Exception {
         assertAcked(prepareCreate("index_date").setMapping("field", "type=date"));
         assertAcked(prepareCreate("index_date_nanos").setMapping("field", "type=date_nanos"));

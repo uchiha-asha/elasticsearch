@@ -17,6 +17,7 @@ import org.apache.lucene.document.FloatPoint;
 import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.SortedNumericDocValuesField;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.Term;
@@ -33,6 +34,7 @@ import org.apache.lucene.tests.search.AssertingIndexSearcher;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.common.lucene.Lucene;
+import org.elasticsearch.common.time.DateUtils;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexVersions;
 import org.elasticsearch.index.fielddata.IndexFieldData.XFieldComparatorSource;
@@ -420,6 +422,8 @@ public class FieldSortBuilderTests extends AbstractSortTestCase<FieldSortBuilder
                     null,
                     Collections.emptyMap()
                 );
+            } else if (name.startsWith("custom-date-nanos")) {
+                fieldType = new DateFieldMapper.DateFieldType(name, DateFieldMapper.Resolution.NANOSECONDS);
             } else if (name.startsWith("custom-date-skipper")) {
                 fieldType = new DateFieldMapper.DateFieldType(
                     name,
@@ -857,6 +861,59 @@ public class FieldSortBuilderTests extends AbstractSortTestCase<FieldSortBuilder
                 }
             }
         }
+    }
+
+    /**
+     * A bottom sort value that is the value the sort gives to documents without a value never makes a shard disjoint, since
+     * the documents of the shard that have no value for the field tie with it. Real bottom values keep the shortcut.
+     */
+    public void testIsBottomSortShardDisjointMissingBottomValue() throws Exception {
+        try (Directory dir = newDirectory()) {
+            try (RandomIndexWriter writer = new RandomIndexWriter(random(), dir, new KeywordAnalyzer())) {
+                Document docWithoutDate = new Document();
+                docWithoutDate.add(new StringField("other", "value", Field.Store.NO));
+                writer.addDocument(docWithoutDate);
+                try (DirectoryReader reader = writer.getReader()) {
+                    SearchExecutionContext context = createMockSearchExecutionContext(newSearcher(reader));
+                    for (String missing : Arrays.asList(null, "_last")) {
+                        FieldSortBuilder dateSort = SortBuilders.fieldSort("custom-date").missing(missing);
+                        assertFalse(isBottomSortShardDisjoint(context, dateSort.order(SortOrder.ASC), Long.MAX_VALUE));
+                        assertFalse(isBottomSortShardDisjoint(context, dateSort.order(SortOrder.DESC), Long.MIN_VALUE));
+                        assertTrue(isBottomSortShardDisjoint(context, dateSort.order(SortOrder.ASC), 0L));
+                        assertTrue(isBottomSortShardDisjoint(context, dateSort.order(SortOrder.DESC), 0L));
+
+                        FieldSortBuilder nanosSort = SortBuilders.fieldSort("custom-date-nanos").missing(missing);
+                        assertFalse(isBottomSortShardDisjoint(context, nanosSort.order(SortOrder.ASC), DateUtils.MAX_NANOSECOND));
+                        assertFalse(isBottomSortShardDisjoint(context, nanosSort.order(SortOrder.DESC), 0L));
+                        assertTrue(isBottomSortShardDisjoint(context, nanosSort.order(SortOrder.ASC), 0L));
+                        assertTrue(isBottomSortShardDisjoint(context, nanosSort.order(SortOrder.ASC), 1L));
+                        assertTrue(isBottomSortShardDisjoint(context, nanosSort.order(SortOrder.DESC), 1L));
+
+                        FieldSortBuilder castSort = SortBuilders.fieldSort("custom-date").missing(missing).setNumericType("date_nanos");
+                        assertFalse(isBottomSortShardDisjoint(context, castSort.order(SortOrder.DESC), 0L));
+                        assertTrue(isBottomSortShardDisjoint(context, castSort.order(SortOrder.DESC), 1L));
+                    }
+                }
+                Document docWithDate = new Document();
+                long value = randomLongBetween(1, Integer.MAX_VALUE);
+                docWithDate.add(new LongPoint("custom-date", value));
+                docWithDate.add(new SortedNumericDocValuesField("custom-date", value));
+                writer.addDocument(docWithDate);
+                try (DirectoryReader reader = writer.getReader()) {
+                    SearchExecutionContext context = createMockSearchExecutionContext(newSearcher(reader));
+                    FieldSortBuilder dateSort = SortBuilders.fieldSort("custom-date");
+                    assertFalse(isBottomSortShardDisjoint(context, dateSort.order(SortOrder.ASC), Long.MAX_VALUE));
+                    assertFalse(isBottomSortShardDisjoint(context, dateSort.order(SortOrder.DESC), Long.MIN_VALUE));
+                    assertTrue(isBottomSortShardDisjoint(context, dateSort.order(SortOrder.ASC), value - 1));
+                }
+            }
+        }
+    }
+
+    private static boolean isBottomSortShardDisjoint(SearchExecutionContext context, FieldSortBuilder sort, long rawBottomValue)
+        throws IOException {
+        DocValueFormat[] formats = new DocValueFormat[] { context.getFieldType(sort.getFieldName()).docValueFormat(null, null) };
+        return sort.isBottomSortShardDisjoint(context, new SearchSortValuesAndFormats(new Object[] { rawBottomValue }, formats));
     }
 
     @Override
