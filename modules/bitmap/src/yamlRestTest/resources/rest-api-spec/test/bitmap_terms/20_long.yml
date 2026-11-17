@@ -250,3 +250,69 @@
                 - term:
                     category: "odd"
   - match: { hits.total: 2 }
+
+---
+"bitmap_terms on a field alias of a long field":
+  - requires:
+      capabilities:
+        - method: POST
+          path: /_search
+          capabilities: [ bitmap_terms_unmapped_and_alias ]
+      test_runner_features: [capabilities]
+      reason: "bitmap_terms on a field alias queries the alias target"
+
+  - do:
+      indices.create:
+        index: test_bitmap_long_alias
+        body:
+          mappings:
+            properties:
+              num:
+                type: long
+              num_alias:
+                type: alias
+                path: num
+              num_terms:
+                type: long
+                index_terms: true
+              num_terms_alias:
+                type: alias
+                path: num_terms
+
+  - do:
+      bulk:
+        refresh: true
+        index: test_bitmap_long_alias
+        body:
+          - '{"index": {}}'
+          - '{"num": 1, "num_terms": 1}'
+          - '{"index": {}}'
+          - '{"num": 1000000000001, "num_terms": 1000000000001}'
+          - '{"index": {}}'
+          - '{"num": 2000000000002, "num_terms": 2000000000002}'
+          - '{"index": {}}'
+          - '{"num": 9223372036854775807, "num_terms": 9223372036854775807}'
+
+  # the three values around 10^12 on the alias of an index_terms field → 2 docs
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test_bitmap_long_alias
+        body:
+          query:
+            bitmap_terms:
+              field: num_terms_alias
+              value: "AwAAAAAAAADoAAAAOjAAAAEAAACl1AAAEAAAAAEQ0QEAADowAAABAAAASqkAABAAAAACILoCAAA6MAAAAQAAAO99AAAQAAAAAzA="
+  - match: { hits.total: 2 }
+
+  # the same bitmap on the alias of a BKD-indexed field → 2 docs
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test_bitmap_long_alias
+        body:
+          query:
+            bitmap_terms:
+              field: num_alias
+              value: "AwAAAAAAAADoAAAAOjAAAAEAAACl1AAAEAAAAAEQ0QEAADowAAABAAAASqkAABAAAAACILoCAAA6MAAAAQAAAO99AAAQAAAAAzA="
+  - match: { hits.total: 2 }

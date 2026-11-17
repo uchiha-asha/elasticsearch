@@ -92,6 +92,8 @@ public final class SearchCapabilities {
 
     /** Scripts that enumerate or return the {@code doc} or {@code _fields} lookup are rejected with a 400. */
     private static final String DOC_LOOKUP_ENUMERATION_ILLEGAL_ARGUMENT = "doc_lookup_enumeration_illegal_argument";
+    /** A {@code bitmap_terms} query on an unmapped field matches no documents, and on a field alias queries the alias target. */
+    private static final String BITMAP_TERMS_UNMAPPED_AND_ALIAS = "bitmap_terms_unmapped_and_alias";
 
     public static final Set<String> CAPABILITIES;
     static {
@@ -139,6 +141,7 @@ public final class SearchCapabilities {
         capabilities.add(COMPOSITE_AGG_REJECTS_NON_POSITIVE_SIZE);
         capabilities.add(NUMERIC_VALUE_SCRIPT_NULL_IS_MISSING);
         capabilities.add(DOC_LOOKUP_ENUMERATION_ILLEGAL_ARGUMENT);
+        capabilities.add(BITMAP_TERMS_UNMAPPED_AND_ALIAS);
         CAPABILITIES = Set.copyOf(capabilities);
     }
 }

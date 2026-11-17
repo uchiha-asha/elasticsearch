@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.query.bitmapterms;
 
+import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.common.ParsingException;
@@ -17,6 +18,9 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.elasticsearch.index.query.LeafQueryBuilder;
+import org.elasticsearch.index.query.MatchNoneQueryBuilder;
+import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
@@ -40,6 +44,8 @@ import java.util.Objects;
  *       (see {@link LongBitmap}). Java clients must call {@code serializePortable} rather than
  *       {@code serialize}, which defaults to a different layout.</li>
  * </ul>
+ * A field alias queries its target field. A field that is not mapped in an index matches no documents
+ * in that index, as with the {@code terms} query.
  * Example:
  * <pre>{@code
  * {
@@ -147,8 +153,19 @@ public class BitmapTermsQueryBuilder extends LeafQueryBuilder<BitmapTermsQueryBu
     }
 
     @Override
+    protected QueryBuilder doIndexMetadataRewrite(QueryRewriteContext context) {
+        if (context.getFieldType(fieldName) == null) {
+            return new MatchNoneQueryBuilder("The \"" + getName() + "\" query is against a field that does not exist");
+        }
+        return this;
+    }
+
+    @Override
     protected Query doToQuery(SearchExecutionContext context) throws IOException {
         MappedFieldType fieldType = context.getFieldType(fieldName);
+        if (fieldType == null) {
+            return new MatchNoDocsQuery("The \"" + getName() + "\" query is against a field that does not exist");
+        }
         if (!(fieldType instanceof NumberFieldMapper.NumberFieldType numberFieldType)
             || (numberFieldType.numberType() != NumberFieldMapper.NumberType.INTEGER
                 && numberFieldType.numberType() != NumberFieldMapper.NumberType.LONG)
@@ -171,11 +188,12 @@ public class BitmapTermsQueryBuilder extends LeafQueryBuilder<BitmapTermsQueryBu
             default -> throw new AssertionError("unexpected number type [" + numberFieldType.numberType() + "]");
         };
         // The two queries differ only in which index structure they merge against; the field's width
-        // is carried by the BitmapValues.
+        // is carried by the BitmapValues. They use the resolved field type's name so that a field alias
+        // queries its target field.
         if (numberFieldType.isIndexedWithTerms()) {
-            return new BitmapTermsQuery(fieldName, values);
+            return new BitmapTermsQuery(numberFieldType.name(), values);
         }
-        return new BitmapBKDQuery(fieldName, values);
+        return new BitmapBKDQuery(numberFieldType.name(), values);
     }
 
     private static IntBitmap integerValues(byte[] bitmapBytes) {

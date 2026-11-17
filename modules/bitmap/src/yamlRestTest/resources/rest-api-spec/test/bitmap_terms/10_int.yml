@@ -286,3 +286,146 @@
                 - term:
                     category: "even"
   - match: { hits.total: 0 }
+
+---
+"bitmap_terms on a field alias":
+  - requires:
+      capabilities:
+        - method: POST
+          path: /_search
+          capabilities: [ bitmap_terms_unmapped_and_alias ]
+      test_runner_features: [capabilities]
+      reason: "bitmap_terms on a field alias queries the alias target"
+
+  - do:
+      indices.create:
+        index: test_bitmap_alias
+        body:
+          mappings:
+            properties:
+              num:
+                type: integer
+              num_alias:
+                type: alias
+                path: num
+              num_terms:
+                type: integer
+                index_terms: true
+              num_terms_alias:
+                type: alias
+                path: num_terms
+
+  - do:
+      bulk:
+        refresh: true
+        index: test_bitmap_alias
+        body:
+          - '{"index": {}}'
+          - '{"num": 1, "num_terms": 1}'
+          - '{"index": {}}'
+          - '{"num": 5, "num_terms": 5}'
+          - '{"index": {}}'
+          - '{"num": 7, "num_terms": 7}'
+          - '{"index": {}}'
+          - '{"num": 20, "num_terms": 20}'
+
+  # bitmap {5..15} on the alias of a BKD-indexed field → {5,7} = 2 docs, as on the field itself
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test_bitmap_alias
+        body:
+          query:
+            bitmap_terms:
+              field: num_alias
+              value: "OzAAAAEAAAoAAQAFAAoA"
+  - match: { hits.total: 2 }
+
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test_bitmap_alias
+        body:
+          query:
+            bitmap_terms:
+              field: num
+              value: "OzAAAAEAAAoAAQAFAAoA"
+  - match: { hits.total: 2 }
+
+  # the same bitmap on the alias of an index_terms field → 2 docs
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test_bitmap_alias
+        body:
+          query:
+            bitmap_terms:
+              field: num_terms_alias
+              value: "OzAAAAEAAAoAAQAFAAoA"
+  - match: { hits.total: 2 }
+
+---
+"bitmap_terms on a field that is not mapped":
+  - requires:
+      capabilities:
+        - method: POST
+          path: /_search
+          capabilities: [ bitmap_terms_unmapped_and_alias ]
+      test_runner_features: [capabilities]
+      reason: "bitmap_terms on an unmapped field matches no documents"
+
+  - do:
+      indices.create:
+        index: test_bitmap_mapped
+        body:
+          mappings:
+            properties:
+              num:
+                type: integer
+
+  - do:
+      indices.create:
+        index: test_bitmap_unmapped
+        body:
+          mappings:
+            properties:
+              other:
+                type: keyword
+
+  - do:
+      bulk:
+        refresh: true
+        body:
+          - '{"index": {"_index": "test_bitmap_mapped"}}'
+          - '{"num": 5}'
+          - '{"index": {"_index": "test_bitmap_mapped"}}'
+          - '{"num": 20}'
+          - '{"index": {"_index": "test_bitmap_unmapped"}}'
+          - '{"other": "a"}'
+
+  # the index without the field matches no documents and the other index still returns its hits
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test_bitmap_mapped,test_bitmap_unmapped
+        body:
+          query:
+            bitmap_terms:
+              field: num
+              value: "OzAAAAEAAAoAAQAFAAoA"
+  - match: { hits.total: 1 }
+  - match: { _shards.failed: 0 }
+  - match: { hits.hits.0._index: test_bitmap_mapped }
+
+  # a field that no index maps matches no documents
+  - do:
+      search:
+        rest_total_hits_as_int: true
+        index: test_bitmap_mapped,test_bitmap_unmapped
+        body:
+          query:
+            bitmap_terms:
+              field: does_not_exist
+              value: "OzAAAAEAAAoAAQAFAAoA"
+  - match: { hits.total: 0 }
+  - match: { _shards.failed: 0 }

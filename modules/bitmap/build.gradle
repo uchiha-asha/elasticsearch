@@ -21,6 +21,6 @@ dependencies {
 
 restResources {
   restApi {
-    include '_common', 'bulk', 'indices', 'index', 'search'
+    include '_common', 'bulk', 'capabilities', 'indices', 'index', 'search'
   }
 }
