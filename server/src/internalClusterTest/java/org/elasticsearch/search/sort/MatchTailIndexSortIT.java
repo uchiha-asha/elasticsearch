@@ -102,6 +102,57 @@ public class MatchTailIndexSortIT extends ESIntegTestCase {
         assertAscSortTimestamps(2, List.of(1000L, 1001L));
     }
 
+    /**
+     * A descending index sort orders multi-valued {@code @timestamp}s by their max value, an ascending query sort by their min value.
+     * The documents with the smallest min values sort in the middle of the segment.
+     */
+    public void testMultiValuedTimestampWithDefaultSortModes() {
+        createIndex(descendingTimestampSort());
+        List<Map<String, Object>> docs = singleValuedDocs();
+        docs.add(Map.of("@timestamp", List.of(1000L, 2010L)));
+        docs.add(Map.of("@timestamp", List.of(1001L, 2011L)));
+        indexBatch(docs);
+        assertNoFailures(indicesAdmin().prepareForceMerge(INDEX).setMaxNumSegments(1).get());
+
+        assertAscSortTimestamps(2, List.of(1000L, 1001L));
+    }
+
+    /**
+     * With {@code index.sort.mode: min} the index sort and the ascending query sort pick the same value, so the smallest min values
+     * are at the end of the segment. The document with the smallest max value sorts in the middle of the segment.
+     */
+    public void testMultiValuedTimestampWithIndexSortModeMin() {
+        createIndex(Settings.builder().put(descendingTimestampSort()).put("index.sort.mode", "min").build());
+        List<Map<String, Object>> docs = singleValuedDocs();
+        docs.add(Map.of("@timestamp", List.of(1900L, 1950L)));
+        for (long i = 0; i < 3; i++) {
+            docs.add(Map.of("@timestamp", List.of(500 + i, 3000 + i)));
+        }
+        indexBatch(docs);
+        assertNoFailures(indicesAdmin().prepareForceMerge(INDEX).setMaxNumSegments(1).get());
+
+        assertAscSortTimestamps(2, List.of(500L, 501L));
+        assertNoFailuresAndResponse(
+            prepareSearch(INDEX).setQuery(matchAllQuery())
+                .addSort(SortBuilders.fieldSort("@timestamp").order(SortOrder.ASC).sortMode(SortMode.MAX))
+                .setSize(2),
+            response -> {
+                List<Object> actual = new ArrayList<>();
+                response.getHits().forEach(hit -> actual.add(hit.getSortValues()[0]));
+                assertThat(actual, equalTo(List.<Object>of(1950L, 2000L)));
+            }
+        );
+    }
+
+    /** Documents with the single-valued timestamps 2000 to 2019. */
+    private static List<Map<String, Object>> singleValuedDocs() {
+        List<Map<String, Object>> docs = new ArrayList<>();
+        for (long i = 0; i < 20; i++) {
+            docs.add(Map.of("@timestamp", 2000 + i));
+        }
+        return docs;
+    }
+
     private static Settings descendingTimestampSort() {
         return Settings.builder().put("index.sort.field", "@timestamp").put("index.sort.order", "desc").build();
     }

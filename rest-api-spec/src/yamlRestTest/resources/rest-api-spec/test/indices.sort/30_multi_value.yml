@@ -517,3 +517,127 @@
   - match: {hits.hits.2._id: "1"}
   - match: {hits.hits.3._id: "5"}
   - match: {hits.hits.4._id: "2"}
+
+---
+"Match all ascending sort on multi-valued @timestamp with a descending index sort":
+
+  - requires:
+      test_runner_features: [ capabilities ]
+      capabilities:
+        - method: POST
+          path: /_search
+          capabilities: [ match_tail_respects_sort_mode ]
+      reason: "match-all @timestamp sorts compare the index sort mode with the query sort mode"
+
+  - do:
+      indices.create:
+        index: test_match_tail
+        body:
+          settings:
+            number_of_shards: 1
+            # 0-1 replicas and the green health check below: see the first test in this file.
+            auto_expand_replicas: 0-1
+            refresh_interval: -1
+            index.sort.field: "@timestamp"
+            index.sort.order: desc
+            routing.rebalance.enable: "none"
+          mappings:
+            properties:
+              "@timestamp":
+                type: date
+
+  - do:
+      cluster.health:
+        index: test_match_tail
+        wait_for_status: green
+        wait_for_events: languid
+        wait_for_no_initializing_shards: true
+
+  # The index sort orders documents by their max value (the default mode for desc): s19 to s0, a, c, b, e.
+  # Document a has the smallest min value (1), so it sorts first ascending although it is in the middle of the segment.
+  - do:
+      bulk:
+        refresh: true
+        index: test_match_tail
+        body:
+          - { "index": { "_id": "s0" } }
+          - { "@timestamp": 200 }
+          - { "index": { "_id": "s1" } }
+          - { "@timestamp": 201 }
+          - { "index": { "_id": "s2" } }
+          - { "@timestamp": 202 }
+          - { "index": { "_id": "s3" } }
+          - { "@timestamp": 203 }
+          - { "index": { "_id": "s4" } }
+          - { "@timestamp": 204 }
+          - { "index": { "_id": "s5" } }
+          - { "@timestamp": 205 }
+          - { "index": { "_id": "s6" } }
+          - { "@timestamp": 206 }
+          - { "index": { "_id": "s7" } }
+          - { "@timestamp": 207 }
+          - { "index": { "_id": "s8" } }
+          - { "@timestamp": 208 }
+          - { "index": { "_id": "s9" } }
+          - { "@timestamp": 209 }
+          - { "index": { "_id": "s10" } }
+          - { "@timestamp": 210 }
+          - { "index": { "_id": "s11" } }
+          - { "@timestamp": 211 }
+          - { "index": { "_id": "s12" } }
+          - { "@timestamp": 212 }
+          - { "index": { "_id": "s13" } }
+          - { "@timestamp": 213 }
+          - { "index": { "_id": "s14" } }
+          - { "@timestamp": 214 }
+          - { "index": { "_id": "s15" } }
+          - { "@timestamp": 215 }
+          - { "index": { "_id": "s16" } }
+          - { "@timestamp": 216 }
+          - { "index": { "_id": "s17" } }
+          - { "@timestamp": 217 }
+          - { "index": { "_id": "s18" } }
+          - { "@timestamp": 218 }
+          - { "index": { "_id": "s19" } }
+          - { "@timestamp": 219 }
+          - { "index": { "_id": "a" } }
+          - { "@timestamp": [ 1, 100 ] }
+          - { "index": { "_id": "c" } }
+          - { "@timestamp": 60 }
+          - { "index": { "_id": "b" } }
+          - { "@timestamp": 50 }
+          - { "index": { "_id": "e" } }
+          - { "@timestamp": 40 }
+
+  - do:
+      indices.forcemerge:
+        index: test_match_tail
+        max_num_segments: 1
+
+  - do:
+      indices.refresh:
+        index: test_match_tail
+
+  # An ascending sort uses the min value by default.
+  - do:
+      search:
+        index: test_match_tail
+        body:
+          query: { match_all: { } }
+          sort: [ { "@timestamp": "asc" } ]
+          size: 1
+
+  - length: { hits.hits: 1 }
+  - match: { hits.hits.0._id: "a" }
+
+  # With mode max the query picks the same value as the index sort.
+  - do:
+      search:
+        index: test_match_tail
+        body:
+          query: { match_all: { } }
+          sort: [ { "@timestamp": { "order": "asc", "mode": "max" } } ]
+          size: 1
+
+  - length: { hits.hits: 1 }
+  - match: { hits.hits.0._id: "e" }

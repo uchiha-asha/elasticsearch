@@ -24,6 +24,8 @@ import org.apache.lucene.search.LongValues;
 import org.apache.lucene.search.Pruning;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.SortedNumericSelector;
+import org.apache.lucene.search.SortedNumericSortField;
 import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.time.DateUtils;
@@ -140,7 +142,7 @@ public class LongValuesComparatorSource extends IndexFieldData.XFieldComparatorS
                     @Override
                     protected XNumericComparator<Long>.CompetitiveDISIBuilder buildCompetitiveDISIBuilder(LeafReaderContext context)
                         throws IOException {
-                        if (alwaysMatchTailQuery == false || segmentSortedByDescTimestamp(context) == false
+                        if (alwaysMatchTailQuery == false || segmentSortedByDescTimestamp(context, sortMode) == false
                         // check that last document has a value to confirm that all documents have a value
                             || lastDocumentHasValue(context.reader(), fieldname) == false) {
                             return super.buildCompetitiveDISIBuilder(context);
@@ -269,7 +271,9 @@ public class LongValuesComparatorSource extends IndexFieldData.XFieldComparatorS
     // missing values at all),
     // or that it is sorted by host.name and then timestamp, where host.name has either no
     // values or only a single value, so timestamp is effectively the primary sort.
-    private static boolean segmentSortedByDescTimestamp(LeafReaderContext context) throws IOException {
+    // The segment order is only the reverse of the query order if the index sort and the query pick the same @timestamp value
+    // for each document (see selectorMatches), or if each document of the segment has at most one @timestamp value.
+    private static boolean segmentSortedByDescTimestamp(LeafReaderContext context, MultiValueMode sortMode) throws IOException {
         Sort sort = context.reader().getMetaData().sort();
         if (sort == null) {
             return false;
@@ -283,7 +287,7 @@ public class LongValuesComparatorSource extends IndexFieldData.XFieldComparatorS
                         return false;
                     }
                 }
-                return sortField.getReverse();
+                return sortField.getReverse() && (selectorMatches(sortField, sortMode) || timestampSingleValued(context.reader()));
             }
             if (isHostNameSingletonInSegment(context, sortField)) {
                 continue;
@@ -291,6 +295,25 @@ public class LongValuesComparatorSource extends IndexFieldData.XFieldComparatorS
             return false;
         }
         return false;
+    }
+
+    // Whether the index sort orders multi-valued documents by the same value that the query's sort mode picks. Only MIN and MAX
+    // pick one of the document's values; SUM, AVG and MEDIAN compute a value that the index sort never orders by.
+    private static boolean selectorMatches(SortField sortField, MultiValueMode sortMode) {
+        if (sortField instanceof SortedNumericSortField sortedNumericSortField) {
+            SortedNumericSelector.Type selector = sortedNumericSortField.getSelector();
+            return switch (sortMode) {
+                case MIN -> selector == SortedNumericSelector.Type.MIN;
+                case MAX -> selector == SortedNumericSelector.Type.MAX;
+                case SUM, AVG, MEDIAN -> false;
+            };
+        }
+        return false;
+    }
+
+    // Whether each document of the segment has at most one @timestamp value, in which case every sort mode picks the same value.
+    private static boolean timestampSingleValued(LeafReader reader) throws IOException {
+        return DocValues.unwrapSingleton(DocValues.getSortedNumeric(reader, "@timestamp")) != null;
     }
 
     // Whether every document of the segment has a value for the field, false if that can't be determined cheaply.
