@@ -288,10 +288,13 @@ public class TransportClusterStateAction extends TransportLocalClusterStateActio
                         IndexAbstraction indexAbstraction = project.getIndicesLookup().get(filteredIndex);
                         if (indexAbstraction.getParentDataStream() != null) {
                             DataStream dataStream = indexAbstraction.getParentDataStream();
-                            // Also the IMD of other backing indices need to be included, otherwise the cluster state api
-                            // can't create a valid cluster state instance:
+                            // Also the IMD of all backing and failure indices of the data stream needs to be included,
+                            // otherwise the cluster state api can't create a valid cluster state instance:
                             for (Index backingIndex : dataStream.getIndices()) {
                                 pBuilder.put(project.index(backingIndex), false);
+                            }
+                            for (Index failureIndex : dataStream.getFailureIndices()) {
+                                pBuilder.put(project.index(failureIndex), false);
                             }
                             pBuilder.put(dataStream);
                         } else {

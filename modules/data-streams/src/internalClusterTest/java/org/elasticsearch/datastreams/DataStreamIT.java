@@ -60,6 +60,7 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.search.MultiSearchRequestBuilder;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchRequestBuilder;
+import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.ClusterStateUpdateTask;
@@ -92,6 +93,7 @@ import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.mapper.DataStreamTimestampFieldMapper;
 import org.elasticsearch.index.mapper.DateFieldMapper;
+import org.elasticsearch.index.mapper.extras.MapperExtrasPlugin;
 import org.elasticsearch.index.query.TermQueryBuilder;
 import org.elasticsearch.index.shard.IndexingStats;
 import org.elasticsearch.indices.IndicesService;
@@ -140,12 +142,14 @@ import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertResp
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertSearchHits;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.arrayWithSize;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItemInArray;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
@@ -158,7 +162,7 @@ public class DataStreamIT extends ESIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return List.of(DataStreamsPlugin.class, MockTransportService.TestPlugin.class);
+        return List.of(DataStreamsPlugin.class, MockTransportService.TestPlugin.class, MapperExtrasPlugin.class);
     }
 
     public void testBasicScenario() throws Exception {
@@ -1624,6 +1628,49 @@ public class DataStreamIT extends ESIntegTestCase {
         ClusterState state = clusterAdmin().state(request).get().getState();
         assertThat(state.metadata().getProject().dataStreams().size(), equalTo(1));
         assertThat(state.metadata().getProject().dataStreams().get("metrics-foo").getName(), equalTo("metrics-foo"));
+    }
+
+    /**
+     * Requesting the cluster state for a failure store index, a pattern matching failure store indices, or a backing index returns
+     * the metadata of the data stream's backing and failure indices. Without an index pattern, both the cluster state and the get
+     * settings response that {@code _cat/indices} builds its rows from contain the failure store index.
+     */
+    public void testClusterStateIncludeFailureIndices() throws Exception {
+        putComposableIndexTemplate("id1", List.of("metrics-foo*"), true);
+        CreateDataStreamAction.Request createDataStreamRequest = new CreateDataStreamAction.Request(
+            TEST_REQUEST_TIMEOUT,
+            TEST_REQUEST_TIMEOUT,
+            "metrics-foo"
+        );
+        client().execute(CreateDataStreamAction.INSTANCE, createDataStreamRequest).get();
+        String failureIndexName = indicesAdmin().rolloverIndex(new RolloverRequest("metrics-foo::failures", null)).get().getNewIndex();
+        GetDataStreamAction.Request getDataStreamRequest = new GetDataStreamAction.Request(
+            TEST_REQUEST_TIMEOUT,
+            new String[] { "metrics-foo" }
+        );
+        DataStream dataStream = client().execute(GetDataStreamAction.INSTANCE, getDataStreamRequest)
+            .get()
+            .getDataStreams()
+            .get(0)
+            .getDataStream();
+        assertThat(dataStream.getFailureIndices().stream().map(Index::getName).toList(), contains(failureIndexName));
+        String backingIndexName = dataStream.getIndices().get(0).getName();
+
+        for (String requested : List.of(".fs-metrics-foo-*", failureIndexName, backingIndexName)) {
+            ClusterStateRequest request = new ClusterStateRequest(TEST_REQUEST_TIMEOUT).indices(requested)
+                .indicesOptions(IndicesOptions.lenientExpandHidden());
+            ProjectMetadata project = clusterAdmin().state(request).get().getState().metadata().getProject();
+            assertThat("failure index metadata for [" + requested + "]", project.index(failureIndexName), notNullValue());
+            assertThat("backing index metadata for [" + requested + "]", project.index(backingIndexName), notNullValue());
+            assertThat(project.dataStreams().keySet(), contains("metrics-foo"));
+        }
+
+        ClusterState fullState = clusterAdmin().state(new ClusterStateRequest(TEST_REQUEST_TIMEOUT)).get().getState();
+        assertThat(fullState.metadata().getProject().index(failureIndexName), notNullValue());
+        GetSettingsResponse settingsResponse = indicesAdmin().prepareGetSettings(TEST_REQUEST_TIMEOUT)
+            .setIndicesOptions(IndicesOptions.strictExpandHidden())
+            .get();
+        assertThat(settingsResponse.getIndexToSettings().keySet(), hasItems(failureIndexName, backingIndexName));
     }
 
     /**

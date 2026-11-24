@@ -11,9 +11,12 @@ package org.elasticsearch.action.admin.cluster.state;
 
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.action.support.ActionFilters;
+import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.cluster.ClusterName;
 import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.metadata.DataStream;
+import org.elasticsearch.cluster.metadata.DataStreamTestHelper;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.metadata.Metadata;
@@ -31,6 +34,7 @@ import org.elasticsearch.cluster.routing.RoutingTable;
 import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.set.Sets;
+import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.indices.TestIndexNameExpressionResolver;
 import org.elasticsearch.tasks.CancellableTask;
@@ -46,6 +50,8 @@ import org.junit.Before;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -182,6 +188,48 @@ public class TransportClusterStateActionTests extends ESTestCase {
         }
     }
 
+    /**
+     * When the request names a backing index, a failure store index, or a pattern matching failure store indices, the filtered
+     * metadata contains the data stream together with the {@link IndexMetadata} of all of its backing and failure indices, and
+     * nothing else.
+     */
+    public void testFilteredMetadataIncludesFailureStoreIndices() throws Exception {
+        final String dataStreamName = randomAlphaOfLength(8).toLowerCase(Locale.ROOT);
+        final long now = System.currentTimeMillis();
+        final IndexMetadata backingIndex = DataStreamTestHelper.getIndexMetadataBuilderForIndex(
+            new Index(DataStream.getDefaultBackingIndexName(dataStreamName, 1, now), randomUUID())
+        ).build();
+        final IndexMetadata failureIndex = DataStreamTestHelper.getIndexMetadataBuilderForIndex(
+            new Index(DataStream.getDefaultFailureStoreName(dataStreamName, 1, now), randomUUID())
+        ).build();
+        final String otherIndex = "other-" + randomAlphaOfLength(6).toLowerCase(Locale.ROOT);
+
+        final ProjectId projectId = Metadata.DEFAULT_PROJECT_ID;
+        final ProjectMetadata.Builder project = projectBuilder(projectId, List.of(otherIndex));
+        project.put(backingIndex, false);
+        project.put(failureIndex, false);
+        project.put(DataStreamTestHelper.newInstance(dataStreamName, List.of(backingIndex.getIndex()), List.of(failureIndex.getIndex())));
+        final ClusterState state = buildClusterState(false, project);
+        final TransportClusterStateAction action = createAction(DefaultProjectResolver.INSTANCE);
+
+        for (String requested : List.of(failureIndex.getIndex().getName(), backingIndex.getIndex().getName(), ".fs-*")) {
+            final ClusterStateRequest request = new ClusterStateRequest(TEST_REQUEST_TIMEOUT).metadata(true)
+                .indices(requested)
+                .indicesOptions(IndicesOptions.lenientExpandHidden());
+
+            final ClusterStateResponse response = executeAction(action, request, state);
+
+            final ProjectMetadata responseProject = response.getState().metadata().getProject(projectId);
+            assertThat(
+                "metadata for request [" + requested + "]",
+                responseProject.indices().keySet(),
+                containsInAnyOrder(backingIndex.getIndex().getName(), failureIndex.getIndex().getName())
+            );
+            assertThat(responseProject.dataStreams().keySet(), contains(dataStreamName));
+            assertThat(responseProject.dataStreams().get(dataStreamName).getFailureIndices(), contains(failureIndex.getIndex()));
+        }
+    }
+
     private static void assertSingleProjectResponse(
         ClusterStateRequest request,
         ClusterStateResponse response,
@@ -240,7 +288,11 @@ public class TransportClusterStateActionTests extends ESTestCase {
 
     private ClusterStateResponse executeAction(ProjectResolver projectResolver, ClusterStateRequest request, ClusterState state)
         throws IOException, InterruptedException, ExecutionException {
-        final TransportClusterStateAction action = new TransportClusterStateAction(
+        return executeAction(createAction(projectResolver), request, state);
+    }
+
+    private TransportClusterStateAction createAction(ProjectResolver projectResolver) {
+        return new TransportClusterStateAction(
             transportService,
             null,
             threadPool,
@@ -249,6 +301,10 @@ public class TransportClusterStateActionTests extends ESTestCase {
             projectResolver,
             new NoOpClient(threadPool)
         );
+    }
+
+    private ClusterStateResponse executeAction(TransportClusterStateAction action, ClusterStateRequest request, ClusterState state)
+        throws IOException, InterruptedException, ExecutionException {
         final PlainActionFuture<ClusterStateResponse> future = new PlainActionFuture<>();
         action.localClusterStateOperation(task, request, state, future);
         return future.get();

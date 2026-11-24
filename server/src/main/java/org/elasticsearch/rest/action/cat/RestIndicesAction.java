@@ -29,6 +29,7 @@ import org.elasticsearch.common.Table;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.time.DateFormatter;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.RestResponse;
@@ -98,6 +99,11 @@ public class RestIndicesAction extends AbstractCatAction {
     @Override
     public boolean allowSystemIndexAccessByDefault() {
         return true;
+    }
+
+    @Override
+    public Set<String> supportedCapabilities() {
+        return Sets.union(Set.of("failure_store_indices"), super.supportedCapabilities());
     }
 
     @Override

@@ -459,3 +459,38 @@ teardown:
   - length: { data_streams.0.failure_store.indices: 2 }
   - match: { data_streams.0.failure_store.indices.0.index_name: '/\.fs-other-data-stream-for-rollover-(\d{4}\.\d{2}\.\d{2}-)?000002/' }
   - match: { data_streams.0.failure_store.indices.1.index_name: '/\.fs-other-data-stream-for-rollover-(\d{4}\.\d{2}\.\d{2}-)?000003/' }
+
+---
+"Cat indices lists failure store indices":
+  - requires:
+      reason: "cat indices lists failure store indices"
+      test_runner_features: [ capabilities ]
+      capabilities:
+        - method: GET
+          path: /_cat/indices
+          capabilities: [ 'failure_store_indices' ]
+
+  - do:
+      indices.rollover:
+        alias: "data-stream-for-rollover::failures"
+  - match: { rolled_over: true }
+
+  - do:
+      cat.indices:
+        index: ".fs-data-stream-for-rollover-*"
+        expand_wildcards: all
+        h: index
+        format: json
+  - length: { $body: 1 }
+  - match: { 0.index: "/^\\.fs-data-stream-for-rollover-(\\d{4}\\.\\d{2}\\.\\d{2}-)?000002$/" }
+
+  - do:
+      cat.indices:
+        index: ".ds-data-stream-for-rollover-*,.fs-data-stream-for-rollover-*"
+        expand_wildcards: all
+        h: index
+        s: index
+        format: json
+  - length: { $body: 2 }
+  - match: { 0.index: "/^\\.ds-data-stream-for-rollover-(\\d{4}\\.\\d{2}\\.\\d{2}-)?000001$/" }
+  - match: { 1.index: "/^\\.fs-data-stream-for-rollover-(\\d{4}\\.\\d{2}\\.\\d{2}-)?000002$/" }
